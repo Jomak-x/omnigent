@@ -129,6 +129,7 @@ _SESSION_OVERRIDE_KEYS = (
     "cost_control_mode_override",
     "subagent_routing_override",
     "harness_override",
+    "provider_override",
 )
 
 
@@ -221,6 +222,7 @@ def _to_conversation(
         cost_control_mode_override=overrides["cost_control_mode_override"],
         subagent_routing_override=overrides["subagent_routing_override"],
         harness_override=overrides["harness_override"],
+        provider_override=overrides["provider_override"],
         sub_agent_name=meta.sub_agent_name if meta else None,
         task_summary=meta.task_summary if meta else None,
         external_session_id=meta.external_session_id if meta else None,
@@ -2715,6 +2717,8 @@ class SqlAlchemyConversationStore(ConversationStore):
         _unset_subagent_routing_override: bool = False,
         harness_override: str | None = None,
         _unset_harness_override: bool = False,
+        provider_override: str | None = None,
+        _unset_provider_override: bool = False,
         terminal_launch_args: list[str] | None = None,
         archived: bool | None = None,
         reported_model: str | None = None,
@@ -2747,6 +2751,12 @@ class SqlAlchemyConversationStore(ConversationStore):
         :param _unset_subagent_routing_override: When ``True``, clear
             ``subagent_routing_override`` to ``None``, which reads as
             Default (the switch is two-state; nothing is inherited).
+        :param provider_override: Per-session provider pin (a ``providers:``
+            config key), e.g. ``"codex-work"``. ``None`` leaves the stored
+            value unchanged.
+        :param _unset_provider_override: When ``True``, clear
+            ``provider_override`` to ``None`` (returning the session to the
+            configured default provider).
         :param harness_override: Per-session brain-harness override,
             e.g. ``"pi"``. ``None`` leaves unchanged.
         :param _unset_harness_override: When ``True``, clear
@@ -2810,6 +2820,12 @@ class SqlAlchemyConversationStore(ConversationStore):
                 overrides_changed = True
             elif harness_override is not None:
                 overrides["harness_override"] = harness_override
+                overrides_changed = True
+            if _unset_provider_override:
+                overrides["provider_override"] = None
+                overrides_changed = True
+            elif provider_override is not None:
+                overrides["provider_override"] = provider_override
                 overrides_changed = True
             if overrides_changed:
                 row.session_overrides = _encode_session_overrides(overrides)

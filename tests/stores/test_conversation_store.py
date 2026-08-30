@@ -335,6 +335,32 @@ def test_update_title(conversation_store: SqlAlchemyConversationStore) -> None:
     )
 
 
+def test_provider_pin_round_trips_and_clears(
+    conversation_store: SqlAlchemyConversationStore,
+) -> None:
+    """The per-session provider pin persists in the overrides blob."""
+    conv = conversation_store.create_conversation()
+    assert conv.provider_override is None
+
+    pinned = conversation_store.update_conversation(conv.id, provider_override="codex-work")
+    assert pinned is not None
+    assert pinned.provider_override == "codex-work"
+
+    # Writing another override must not disturb the pin.
+    with_model = conversation_store.update_conversation(conv.id, model_override="sonnet")
+    assert with_model is not None
+    assert with_model.provider_override == "codex-work"
+
+    fetched = conversation_store.get_conversation(conv.id)
+    assert fetched is not None
+    assert fetched.provider_override == "codex-work"
+
+    cleared = conversation_store.update_conversation(conv.id, _unset_provider_override=True)
+    assert cleared is not None
+    assert cleared.provider_override is None
+    assert cleared.model_override == "sonnet"
+
+
 def test_reported_model_round_trips_beside_the_request(
     conversation_store: SqlAlchemyConversationStore,
 ) -> None:

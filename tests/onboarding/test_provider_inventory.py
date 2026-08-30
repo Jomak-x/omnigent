@@ -71,6 +71,7 @@ def test_inventory_combines_configured_and_detected_providers_without_secrets() 
             "connection_state": "unavailable",
             "connection_detail": "The claude CLI is not installed on this host.",
             "default_for_harnesses": ["claude-native", "claude-sdk"],
+            "serves_harnesses": ["claude-native", "claude-sdk"],
         },
         {
             "id": "work",
@@ -96,6 +97,7 @@ def test_inventory_combines_configured_and_detected_providers_without_secrets() 
             "connection_state": "connected",
             "connection_detail": "The openai credential resolves.",
             "default_for_harnesses": ["codex-native", "codex", "openai-agents", "pi-native", "pi"],
+            "serves_harnesses": ["codex-native", "codex", "openai-agents", "pi-native", "pi"],
         },
     ]
     serialized = repr(rows)

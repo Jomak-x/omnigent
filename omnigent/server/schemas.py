@@ -1390,6 +1390,12 @@ class SessionCreateRequest(BaseModel):
         harness (native CLIs read it as ``--model`` at terminal launch;
         SDK harnesses via the spawn env). Validated server-side against
         a conservative model-id charset. ``None`` = harness default.
+    :param provider_override: Optional per-session provider pin naming an
+        entry in the host's ``providers:`` block, e.g. ``"codex-work"``. Set
+        by the New Chat provider picker so the session launches on the chosen
+        account rather than the configured default. Validated here only for
+        shape — the provider config lives on the host, so a name this server
+        cannot see is resolved (or fallen back from) at launch.
     :param reasoning_effort: Optional per-session reasoning-effort
         override to persist at create time, e.g. ``"high"``. Set by the
         web UI's new-chat model/effort picker (claude-native today) so
@@ -1452,6 +1458,7 @@ class SessionCreateRequest(BaseModel):
     cost_control_mode_override: str | None = None
     subagent_routing_override: str | None = None
     harness_override: str | None = None
+    provider_override: str | None = None
     smart_routing_message: str | None = None
 
     @model_validator(mode="after")
@@ -1899,6 +1906,10 @@ class SessionResponse(BaseModel):
         a row created before this became explicit inherits nothing.
         Stamped ``"on"`` at create for Smart Routing sessions; also set
         via ``PATCH /v1/sessions/{id}``.
+    :param provider_override: Per-session provider pin — the ``providers:``
+        config key this session launches on, e.g. ``"codex-work"``. ``None``
+        means the host's configured default for the harness. Read by the
+        runner at terminal launch.
     :param context_window: The model's context window size in tokens
         as looked up server-side from litellm's registry (or from the
         ``AP_CONTEXT_WINDOW_OVERRIDE`` env var), e.g. ``200_000``.
@@ -2055,6 +2066,7 @@ class SessionResponse(BaseModel):
     model_override: str | None = None
     cost_control_mode_override: str | None = None
     subagent_routing_override: str | None = None
+    provider_override: str | None = None
     context_window: int | None = None
     last_total_tokens: int | None = None
     total_cost_usd: float | None = None

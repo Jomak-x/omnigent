@@ -66,7 +66,7 @@ import {
   defaultModelLabel,
   nativeModelLabel,
 } from "@/components/HarnessConfigControls";
-import { NewChatProviderStatus } from "@/shell/NewChatProviderStatus";
+import { DEFAULT_PROVIDER_VALUE, NewChatProviderStatus } from "@/shell/NewChatProviderStatus";
 import { ProjectLandingIcon } from "@/components/ProjectIconPicker";
 import {
   DropdownMenu,
@@ -269,6 +269,7 @@ function createdHarnessOptions({
   cursorExecMode,
   agySkipMode,
   pickedModel,
+  pickedProvider,
   pickedEffort,
   smartRoutingEligible,
   costControlMode,
@@ -286,6 +287,7 @@ function createdHarnessOptions({
   cursorExecMode: string;
   agySkipMode: string;
   pickedModel: string;
+  pickedProvider: string;
   pickedEffort: string;
   smartRoutingEligible: boolean;
   costControlMode: CostControlMode;
@@ -293,6 +295,8 @@ function createdHarnessOptions({
   if (harness === null) return null;
 
   const options: HarnessOptions = {};
+  // The pin applies to every harness, so it is remembered unconditionally.
+  options.provider = pickedProvider;
   if (supportsModelPicker) options.model = pickedModel;
   if (supportsEffortPicker && !supportsPermissionMode) options.effort = pickedEffort;
   if (supportsPermissionMode) {
@@ -1400,6 +1404,7 @@ function HarnessConfigModal({
   agySkipMode,
   bypassSandbox,
   pickedModel,
+  pickedProvider,
   claudeModelOptions,
   claudeModelsLoading,
   claudeModelsError,
@@ -1417,6 +1422,7 @@ function HarnessConfigModal({
   setAgySkipMode,
   setBypassSandbox,
   setPickedModel,
+  setPickedProvider,
   setPickedEffort,
   setPickedHarness,
   setCostControlMode,
@@ -1434,6 +1440,7 @@ function HarnessConfigModal({
   agySkipMode: string;
   bypassSandbox: boolean;
   pickedModel: string;
+  pickedProvider: string;
   claudeModelOptions: readonly Pick<NativeModelOption, "id" | "displayName" | "isDefault">[];
   claudeModelsLoading: boolean;
   claudeModelsError: string | null;
@@ -1451,6 +1458,7 @@ function HarnessConfigModal({
   setAgySkipMode: (mode: string) => void;
   setBypassSandbox: (enabled: boolean) => void;
   setPickedModel: (model: string) => void;
+  setPickedProvider: (provider: string) => void;
   setPickedEffort: (effort: string) => void;
   setPickedHarness: (harness: string | null, agentId?: string) => void;
   setCostControlMode: (mode: CostControlMode) => void;
@@ -1471,6 +1479,7 @@ function HarnessConfigModal({
   // Local draft — seeded from the live state each time the modal opens so
   // Cancel can discard and re-opening always reflects the committed state.
   const [draftModel, setDraftModel] = useState(pickedModel);
+  const [draftProvider, setDraftProvider] = useState(pickedProvider);
   const [draftEffort, setDraftEffort] = useState(pickedEffort);
   const [draftPermission, setDraftPermission] = useState(permissionMode);
   const [draftApproval, setDraftApproval] = useState(approvalMode);
@@ -1483,6 +1492,7 @@ function HarnessConfigModal({
   useEffect(() => {
     if (!open) return;
     setDraftModel(pickedModel);
+    setDraftProvider(pickedProvider);
     setDraftEffort(pickedEffort);
     setDraftPermission(permissionMode);
     setDraftApproval(approvalMode);
@@ -1588,6 +1598,11 @@ function HarnessConfigModal({
       // Picking the spec default clears the override so the session tracks it.
       setPickedHarness(draftHarness === brainDefault ? null : draftHarness, agent.id);
     }
+    // The provider pin is orthogonal to every capability branch above — any
+    // agent can run on a second account of its provider — so commit it once
+    // here, and remember it per harness like the model pick.
+    setPickedProvider(draftProvider);
+    if (entryHarness) writeHarnessOption(entryHarness, { provider: draftProvider });
     // Smart Routing rides the Model dropdown on both routable harnesses
     // (Claude Code and Codex), so commit it outside the per-capability branches.
     // Remembered per harness like the model pick, so the next new session with
@@ -1641,7 +1656,15 @@ function HarnessConfigModal({
             description="Serves this agent on the selected host"
             controlClassName="sm:w-80"
           >
-            <NewChatProviderStatus host={host} harness={draftHarness ?? entryHarness} open={open} />
+            <NewChatProviderStatus
+              host={host}
+              harness={draftHarness ?? entryHarness}
+              open={open}
+              value={draftProvider}
+              onValueChange={(provider) =>
+                setDraftProvider(provider === DEFAULT_PROVIDER_VALUE ? "" : provider)
+              }
+            />
           </ConfigRow>
           {!autoRouting && hasModelPicker && !hasPermission && (
             <>
@@ -1980,6 +2003,7 @@ interface LandingDraft {
   agySkipMode: string;
   pickedHarness: string | null;
   pickedModel: string;
+  pickedProvider: string;
   pickedEffort: string;
   costControlMode: CostControlMode;
 }
@@ -2457,6 +2481,11 @@ export function NewChatLandingScreen() {
   // An explicit pick rides along and is remembered (seeded back on a later visit
   // via the harness-seed effect below).
   const [pickedModel, _setPickedModel] = useState<string>(() => restoredDraft?.pickedModel ?? "");
+  // Per-session provider pin ("" = the host's configured default). Chosen in
+  // the Configure modal and sent as ``provider_override`` on create.
+  const [pickedProvider, setPickedProvider] = useState<string>(
+    () => restoredDraft?.pickedProvider ?? "",
+  );
   const [pickedEffort, setPickedEffort] = useState<string>(() => restoredDraft?.pickedEffort ?? "");
   // Per-session cost-control switch ("Cost Optimized" pill). Unset
   // (null) defers to the agent spec's default and is omitted from
@@ -2524,6 +2553,7 @@ export function NewChatLandingScreen() {
     agySkipMode,
     pickedHarness,
     pickedModel,
+    pickedProvider,
     pickedEffort,
     costControlMode,
   };
@@ -3120,6 +3150,11 @@ export function NewChatLandingScreen() {
     // this holds on every run of this effect — including the re-run when the
     // model catalog resolves, which lands after the routing seed below.
     const storedRoutingOn = stored.routing === "on";
+    // A remembered provider pin is seeded verbatim: whether the host still has
+    // that provider is the host's answer, and the picker shows the fallback's
+    // state when it does not, so a stale name stays visible instead of being
+    // silently dropped.
+    setPickedProvider(stored.provider ?? "");
     if (selectedNativeHarness === "pi-native") {
       setPickedModel(
         stored.model != null && piModelOptions.some((model) => model.id === stored.model)
@@ -4101,6 +4136,9 @@ export function NewChatLandingScreen() {
               pickedEffort
                 ? pickedEffort
                 : undefined,
+            // The chosen account for this session; omitted when the user left
+            // the picker on Default so the host's configured default applies.
+            provider_override: pickedProvider || undefined,
             cost_control_mode_override: costControlOverride,
             // Top-level Smart Routing sends the same "auto" sentinel the bundle
             // path does; the server tells them apart by the bound agent being a
@@ -4174,6 +4212,7 @@ export function NewChatLandingScreen() {
           cursorExecMode,
           agySkipMode,
           pickedModel,
+          pickedProvider,
           pickedEffort,
           smartRoutingEligible: effectiveAgentId !== PENDING_AGENT_ID && smartRoutingEligible,
           costControlMode,
@@ -4706,6 +4745,7 @@ export function NewChatLandingScreen() {
                     agySkipMode={agySkipMode}
                     bypassSandbox={bypassSandbox}
                     pickedModel={pickedModel}
+                    pickedProvider={pickedProvider}
                     claudeModelOptions={claudeModelOptions}
                     claudeModelsLoading={
                       !sandboxSelected && selectedHostId !== null && hostClaudeModelsLoading
@@ -4733,6 +4773,7 @@ export function NewChatLandingScreen() {
                     setAgySkipMode={setAgySkipMode}
                     setBypassSandbox={setBypassSandbox}
                     setPickedModel={setPickedModel}
+                    setPickedProvider={setPickedProvider}
                     setPickedEffort={setPickedEffort}
                     setPickedHarness={handleSetPickedHarness}
                     setCostControlMode={setCostControlMode}

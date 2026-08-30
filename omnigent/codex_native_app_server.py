@@ -15,7 +15,7 @@ import sys
 import tempfile
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, TypeAlias, cast
 
@@ -2692,8 +2692,84 @@ def _resolve_subscription_launch(
     )
 
 
+def _pinned_codex_launch(
+    explicit: dict[str, object],
+    provider_name: str,
+    model: str | None,
+) -> NativeCodexLaunch | None:
+    """Resolve a per-session provider pin, or ``None`` to fall through.
+
+    Falls through (rather than failing) when the pinned name is absent from
+    this host's config or cannot route: the pin was validated for shape by a
+    server that cannot see the host's providers, so a stale or mistyped name
+    must degrade to the configured default instead of stranding the session on
+    a sign-in screen. Every outcome is logged with the name, so the fallback is
+    visible rather than silent.
+    """
+    from omnigent.onboarding.detected import effective_config_with_detected
+    from omnigent.onboarding.provider_config import SUBSCRIPTION_KIND, load_providers
+
+    try:
+        effective = effective_config_with_detected(explicit, None)
+        entry = load_providers(effective).get(provider_name)
+    except Exception:  # noqa: BLE001 - a malformed config must not break the launch
+        _logger.warning(
+            "native-codex routing: provider pin %r could not be resolved; "
+            "falling back to the configured default.",
+            provider_name,
+            exc_info=True,
+        )
+        return None
+    if entry is None:
+        _logger.warning(
+            "native-codex routing: provider pin %r is not configured on this host; "
+            "falling back to the configured default.",
+            provider_name,
+        )
+        return None
+    if entry.kind == SUBSCRIPTION_KIND:
+        # A pinned subscription is an explicit account choice: never substitute
+        # another provider behind the user's back the way the machine-default
+        # path does. Its own home decides whether it is signed in.
+        entry_home = _provider_codex_home(entry)
+        auth_home = entry_home or _codex_home_config_source_from_env()
+        from omnigent.onboarding.ambient import codex_auth_has_credential
+
+        signed_in = codex_auth_has_credential(auth_home / "auth.json")
+        log_info_once(
+            _logger,
+            "native-codex routing: pinned subscription provider %r (%s)",
+            provider_name,
+            "signed in" if signed_in else "NOT signed in",
+        )
+        return NativeCodexLaunch(
+            config_overrides=['model_provider="openai"'],
+            model=model,
+            profile=None,
+            summary=(
+                f"Codex CLI login (pinned provider {provider_name!r}; "
+                + ("Codex is logged in" if signed_in else "Codex is not logged in")
+                + ")"
+            ),
+            cli_home=str(entry_home) if entry_home is not None else None,
+        )
+    launch = _codex_provider_launch(entry, model)
+    if launch is None:
+        _logger.warning(
+            "native-codex routing: provider pin %r cannot route a Codex launch "
+            "(no usable openai credential); falling back to the configured default.",
+            provider_name,
+        )
+        return None
+    log_info_once(_logger, "native-codex routing: pinned provider %r", provider_name)
+    return replace(launch, summary=f"pinned provider {provider_name!r}: {launch.summary}")
+
+
 def resolve_native_codex_launch(
-    *, model: str | None, spec: AgentSpec | None = None
+    *,
+    model: str | None,
+    spec: AgentSpec | None = None,
+    provider_name: str | None = None,
 ) -> NativeCodexLaunch:
     """Resolve the native Codex launch config across all offerings.
 
@@ -2702,7 +2778,13 @@ def resolve_native_codex_launch(
     ``openai`` surface, so ``omnigent codex`` and a host-spawned native
     Codex session route through ``omnigent setup``:
 
-    0. (with *spec*) a spec-level credential — ``executor.auth`` naming a
+    0. (with *provider_name*) an explicit per-session provider pin — the user
+       chose this account for this session, so it outranks every default,
+       including a spec's. An unknown name falls back to the chain below and
+       logs, because the pin was validated for shape on a server that cannot
+       see this host's provider config;
+
+    0b. (with *spec*) a spec-level credential — ``executor.auth`` naming a
        provider (:class:`~omnigent.spec.types.ProviderAuth`, fails loud when
        undeclared), a spec :class:`~omnigent.spec.types.DatabricksAuth`, or a
        legacy ``executor.profile`` / ``executor.config.profile`` — resolved
@@ -2736,6 +2818,9 @@ def resolve_native_codex_launch(
     :param spec: The custom agent spec launching this session, when there is
         one, so its ``executor.auth`` / legacy profile win over machine-level
         config (issue #2744 — parity with the in-process codex harness).
+    :param provider_name: A per-session provider pin naming an entry in the
+        ``providers:`` block, e.g. ``"codex-work"``. ``None`` (the default)
+        keeps the pre-pin behaviour exactly.
     :returns: The resolved :class:`NativeCodexLaunch`.
     """
     from omnigent.onboarding.ambient import codex_config_detection
@@ -2763,6 +2848,10 @@ def resolve_native_codex_launch(
     # codex's built-in provider in that case so the dismissal holds at run
     # time. An undetectable/undismissed custom provider keeps its routing.
     no_provider_overrides = ['model_provider="openai"'] if config_provider_dismissed else []
+    if provider_name is not None:
+        pinned = _pinned_codex_launch(explicit, provider_name, model)
+        if pinned is not None:
+            return pinned
     if spec is not None and (
         spec.executor.auth is not None
         or spec.executor.profile

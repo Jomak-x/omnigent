@@ -34,6 +34,7 @@ from omnigent.onboarding.provider_config import (
     GATEWAY_KIND,
     KEY_KIND,
     LOCAL_KIND,
+    PI_SURFACE,
     SUBSCRIPTION_KIND,
     FamilyConfig,
     ProviderEntry,
@@ -42,6 +43,7 @@ from omnigent.onboarding.provider_config import (
     load_providers,
     provider_cli_home,
     provider_families,
+    provider_family_for_harness,
     resolve_secret,
 )
 from omnigent.spec.parser import check_unresolved_env_vars
@@ -378,6 +380,7 @@ class ProviderInventoryEntry:
     connection_state: ConnectionState
     connection_detail: str
     default_for_harnesses: tuple[str, ...] = ()
+    serves_harnesses: tuple[str, ...] = ()
     # Host-side only, deliberately absent from ``as_dict``: a credential root
     # is the host's business, and the frontend has no use for the path.
     cli_home: str | None = None
@@ -403,6 +406,7 @@ class ProviderInventoryEntry:
             "connection_state": self.connection_state.value,
             "connection_detail": self.connection_detail,
             "default_for_harnesses": list(self.default_for_harnesses),
+            "serves_harnesses": list(self.serves_harnesses),
         }
 
 
@@ -463,6 +467,7 @@ def provider_capabilities(provider: ProviderEntry) -> ProviderCapabilities:
 # Harnesses a pre-session picker asks about. Resolving each one host-side keeps
 # the harness→provider rule in the one function that owns it, instead of
 # re-deriving it from families in the web app.
+_PI_PICKER_HARNESSES: frozenset[str] = frozenset({"pi", "pi-native"})
 _PICKER_HARNESSES: tuple[str, ...] = (
     "claude-native",
     "claude-sdk",
@@ -472,6 +477,27 @@ _PICKER_HARNESSES: tuple[str, ...] = (
     "pi-native",
     "pi",
 )
+
+
+def _serves_harnesses(provider: ProviderEntry, surfaces: tuple[str, ...]) -> tuple[str, ...]:
+    """Return the picker harnesses this provider *could* serve.
+
+    A superset of :attr:`ProviderInventoryEntry.default_for_harnesses`: being
+    the default is one thing, being selectable is another. Computed here, from
+    the same family mapping a launch uses, so a pre-session picker never has to
+    re-derive harness→family in the web app.
+    """
+    surface_set = set(surfaces)
+    served: list[str] = []
+    for harness in _PICKER_HARNESSES:
+        if harness in _PI_PICKER_HARNESSES:
+            if PI_SURFACE in surface_set:
+                served.append(harness)
+            continue
+        family = provider_family_for_harness(harness)
+        if family is not None and family in surface_set:
+            served.append(harness)
+    return tuple(served)
 
 
 def _default_harnesses_by_provider(config: dict[str, object]) -> dict[str, tuple[str, ...]]:
@@ -596,6 +622,7 @@ def build_provider_inventory(
                 connection_state=connection.state,
                 connection_detail=connection.detail,
                 default_for_harnesses=default_harnesses.get(provider.name, ()),
+                serves_harnesses=_serves_harnesses(provider, surfaces),
                 cli_home=_resolved_cli_home(provider),
             )
         )

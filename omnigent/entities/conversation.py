@@ -130,6 +130,14 @@ class Conversation:
         ``PATCH /v1/sessions/{id}`` (the web "Cost Optimized"
         toggle). Read by the cost-control advisor pipeline at turn
         start; mirrors the persistence shape of ``model_override``.
+    :param provider_override: Per-session provider pin — the name of an
+        entry in the host's ``providers:`` block, e.g. ``"codex-work"``.
+        Chosen before the session starts (the New Chat provider picker) and
+        resolved at launch, where it outranks the configured per-family
+        default. ``None`` means "use the configured default", which is what
+        every session did before pins existed. A name the host does not have
+        falls back to that default rather than failing the launch — the
+        config lives on the host, so the server cannot validate it.
     :param subagent_routing_override: Per-session subagent-routing
         switch, two-state: ``"on"`` routes native/SDK subagent spawns,
         and ``"off"`` or ``None`` (unset) both leave them on the parent's
@@ -235,6 +243,7 @@ class Conversation:
     reported_model: str | None = None
     cost_control_mode_override: str | None = None
     subagent_routing_override: str | None = None
+    provider_override: str | None = None
     harness_override: str | None = None
     sub_agent_name: str | None = None
     task_summary: str | None = None

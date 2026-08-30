@@ -424,6 +424,12 @@ export interface ProviderInventoryEntry {
    * "this host does not say", not "serves nothing".
    */
   default_for_harnesses?: string[];
+  /**
+   * Harnesses this provider *could* serve — a superset of
+   * `default_for_harnesses`, and the list a pre-session picker offers.
+   * Absent from older hosts.
+   */
+  serves_harnesses?: string[];
   /** Absent from hosts predating connection states — treat as "unknown". */
   connection_state?: ProviderConnectionState;
   /** The host's own non-secret sentence explaining the state. */

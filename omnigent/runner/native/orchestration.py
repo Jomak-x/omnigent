@@ -57,6 +57,7 @@ from omnigent.native_coding_agents import (
 )
 from omnigent.native_dispatch import resolve_hook
 from omnigent.process_logging import process_log_reference
+from omnigent.provider_override import validate_provider_override
 from omnigent.runner.resource_registry import (
     ANTIGRAVITY_NATIVE_TERMINAL_ROLE,
     CLAUDE_NATIVE_TERMINAL_ROLE,
@@ -431,6 +432,9 @@ class _CodexNativeLaunchConfig:
         rollout exists to clone (an SDK or cross-family source) the runner
         builds the clone's rollout from the copied Omnigent items instead (see
         ``_ensure_local_codex_resume_rollout``).
+    :param provider_override: Per-session provider pin (a ``providers:``
+        config key), e.g. ``"codex-work"``. ``None`` uses the host's
+        configured default for the harness.
     :param bypass_sandbox: ``True`` when the session opted into Codex's
         DANGEROUS full-bypass stance (``omnigent.codex_native.bypass_sandbox``
         label == ``"1"``). The runner then launches the ``--remote`` TUI with
@@ -465,6 +469,7 @@ class _CodexNativeLaunchConfig:
     fork_source_external_id: str | None
     fork_carry_history: bool
     bypass_sandbox: bool
+    provider_override: str | None = None
     auto_harness: bool = False
     routing_enabled: bool = False
     turn_routing: bool = False
@@ -1046,11 +1051,22 @@ async def _codex_native_launch_config(
         harness_override=_harness_override if isinstance(_harness_override, str) else None,
         labels=labels if isinstance(labels, dict) else None,
     )
+    provider_override = snapshot.get("provider_override")
+    if provider_override is not None:
+        if not isinstance(provider_override, str):
+            raise RuntimeError(f"Invalid provider_override for Codex session {session_id!r}.")
+        try:
+            provider_override = validate_provider_override(provider_override)
+        except ValueError as exc:
+            raise RuntimeError(
+                f"Invalid provider_override for Codex session {session_id!r}: {exc}"
+            ) from exc
     return _CodexNativeLaunchConfig(
         workspace=_codex_session_workspace(session_workspace),
         policy_server_url=_required_runner_env("RUNNER_SERVER_URL"),
         terminal_launch_args=terminal_launch_args,
         model_override=model_override,
+        provider_override=provider_override,
         external_session_id=external_session_id,
         fork_source_id=fork_source_id,
         fork_source_external_id=fork_source_external_id,
@@ -3810,7 +3826,13 @@ async def _auto_create_codex_terminal(
     # Thread the spec so its executor.auth / legacy profile win over
     # machine-level config, parity with the in-process harness (#2744).
     _launch_spec = agent_spec.spec if isinstance(agent_spec, ResolvedSpec) else agent_spec
-    _codex_launch = resolve_native_codex_launch(model=default_model, spec=_launch_spec)
+    _codex_launch = resolve_native_codex_launch(
+        model=default_model,
+        spec=_launch_spec,
+        # The user's explicit account pick for this session outranks the
+        # machine default and the spec's own credential.
+        provider_name=launch_config.provider_override,
+    )
     _session_meta_provider = codex_session_meta_model_provider(_codex_launch)
     from omnigent.inner.codex_executor import _find_codex_cli
 

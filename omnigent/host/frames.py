@@ -2119,6 +2119,12 @@ def _decode_provider_inventory(raw: object) -> list[_JsonObject]:
             if isinstance(raw_harnesses, list)
             else []
         )
+        raw_serves = item.get("serves_harnesses")
+        serves_harnesses = (
+            [name for name in raw_serves if isinstance(name, str)]
+            if isinstance(raw_serves, list)
+            else []
+        )
         raw_state = item.get("connection_state")
         state = raw_state if raw_state in _PROVIDER_CONNECTION_STATES else "unknown"
         raw_detail = item.get("connection_detail")
@@ -2136,6 +2142,7 @@ def _decode_provider_inventory(raw: object) -> list[_JsonObject]:
                 "connection_state": state,
                 "connection_detail": detail,
                 "default_for_harnesses": default_for_harnesses,
+                "serves_harnesses": serves_harnesses,
             }
         )
     return providers

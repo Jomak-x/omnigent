@@ -65,6 +65,7 @@ from omnigent.policies.types import (
     EvaluationContext,
     PolicyResult,
 )
+from omnigent.provider_override import validate_provider_override
 from omnigent.runner.routing import RunnerRouter
 from omnigent.runner.session_init_protocol import build_runner_session_init_payload
 from omnigent.runner.subagent_routing import (
@@ -1102,6 +1103,7 @@ def _build_session_response(
         model_override=conv.model_override,
         cost_control_mode_override=conv.cost_control_mode_override,
         subagent_routing_override=conv.subagent_routing_override,
+        provider_override=conv.provider_override,
         context_window=context_window,
         last_total_tokens=last_total_tokens,
         # Seed the client's cost indicator on resume. Uses the SUBTREE
@@ -8056,6 +8058,21 @@ async def _create_session_from_existing_agent(
         reasoning_effort=body.reasoning_effort,
     )
 
+    # Same rule for the provider pin: it reaches the launch as a config-block
+    # key, so reject anything flag- or path-shaped before a row exists. An
+    # unknown-but-well-formed name is NOT rejected — the providers config lives
+    # on the host, so this server cannot know what exists there; the launch
+    # falls back to the configured default and logs it.
+    provider_override: str | None = None
+    if body.provider_override is not None:
+        try:
+            provider_override = validate_provider_override(body.provider_override)
+        except ValueError as exc:
+            raise OmnigentError(
+                f"invalid provider_override: {exc}",
+                code=ErrorCode.INVALID_INPUT,
+            ) from exc
+
     # Validated before any row exists so a bad value never creates an
     # orphan session; None (unset) defers to the spec default.
     cost_control_mode_override = _validated_cost_control_mode_override(
@@ -8350,6 +8367,7 @@ async def _create_session_from_existing_agent(
         or cost_control_mode_override is not None
         or subagent_routing_override is not None
         or harness_override is not None
+        or provider_override is not None
     ):
         # ``create_conversation`` has no override params; reuse the
         # PATCH path's store write before the runner reads the snapshot
@@ -8363,6 +8381,7 @@ async def _create_session_from_existing_agent(
             cost_control_mode_override=cost_control_mode_override,
             subagent_routing_override=subagent_routing_override,
             harness_override=harness_override,
+            provider_override=provider_override,
         )
         if updated_conv is None:
             raise OmnigentError(

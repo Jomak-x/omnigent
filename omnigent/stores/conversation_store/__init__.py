@@ -802,6 +802,8 @@ class ConversationStore(ABC):
         _unset_subagent_routing_override: bool = False,
         harness_override: str | None = None,
         _unset_harness_override: bool = False,
+        provider_override: str | None = None,
+        _unset_provider_override: bool = False,
         terminal_launch_args: list[str] | None = None,
         archived: bool | None = None,
         reported_model: str | None = None,
@@ -811,7 +813,7 @@ class ConversationStore(ABC):
 
         For ``reasoning_effort``, ``model_override``,
         ``cost_control_mode_override``, ``subagent_routing_override``,
-        and ``harness_override``,
+        ``harness_override``, and ``provider_override``,
         ``None`` means "leave unchanged". To explicitly clear them
         back to ``None``, pass
         the matching ``_unset_*`` flag. ``reported_model`` (the model
