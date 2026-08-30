@@ -13,6 +13,9 @@
  *   default transcript view, Workspace panel default, and UI/code font controls.
  * - **Git** — Git behavior: the global "always use a random worktree" default
  *   and the default base branch pre-filled when naming a new worktree branch.
+ * - **Providers** — the model providers configured on or detected for the
+ *   selected host (the same detection Omni Setup uses), with a Manage
+ *   affordance that reuses the harness setup checklist for CLI-backed rows.
  * - **Keyboard shortcuts** — the full shortcuts reference, shown inline.
  * - **Account** — only when the accounts auth provider is active. Absorbs
  *   the old sidebar AccountMenu: signed-in identity, change password, and
@@ -41,6 +44,10 @@ import {
 import {
   ArchiveRestoreIcon,
   AlertTriangleIcon,
+  CableIcon,
+  CircleAlertIcon,
+  CircleCheckIcon,
+  CircleDashedIcon,
   KeyRoundIcon,
   Loader2Icon,
   LaptopMinimalIcon,
@@ -52,6 +59,7 @@ import {
   PanelRightCloseIcon,
   PanelRightIcon,
   PlusIcon,
+  RefreshCwIcon,
   SunIcon,
   SquareCheckIcon,
   SquareIcon,
@@ -90,6 +98,15 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { KeyboardShortcutsList } from "@/components/KeyboardShortcutsDialog";
+import { Badge } from "@/components/ui/badge";
+import {
+  useHosts,
+  useProviderInventory,
+  type ProviderCapabilitySupport,
+  type ProviderInventoryEntry,
+} from "@/hooks/useHosts";
+import { useHarnessSetupSteps } from "@/lib/agentLabels";
+import { HarnessSetupDialog } from "@/shell/HarnessSetupDialog";
 import { changePassword, logout } from "@/lib/accountsApi";
 import { getCurrentIsAdmin, getCurrentUserId, resolveIdentity } from "@/lib/identity";
 import { useServerInfo } from "@/lib/CapabilitiesContext";
@@ -284,6 +301,7 @@ export function SettingsPage() {
     <PageScroll contentClassName="px-8" extraBottom="2.5rem">
       {section === "appearance" && <AppearanceSection />}
       {section === "git" && <GitSection />}
+      {section === "providers" && <ProvidersSection />}
       {section === "shortcuts" && <ShortcutsSection />}
       {section === "import" && <ImportSection />}
       {section === "account" && hasAuthSession && <AccountSection />}
@@ -902,6 +920,280 @@ function GitSection() {
         <AlwaysUseWorktreeControl />
         <DefaultBaseBranchControl />
       </div>
+    </Section>
+  );
+}
+
+/** Provider rows whose `cli` maps to a harness with server-authored setup
+ *  steps can reuse the harness setup checklist as their Manage surface. */
+function providerManageHarness(
+  provider: ProviderInventoryEntry,
+  setupStepsByHarness: Record<string, unknown>,
+): string | null {
+  if (!provider.cli) return null;
+  return setupStepsByHarness[provider.cli] ? provider.cli : null;
+}
+
+function capabilityChipClass(state: ProviderCapabilitySupport): string {
+  if (state === "supported") return "text-foreground";
+  return "text-muted-foreground";
+}
+
+function CapabilityChip({ label, state }: { label: string; state: ProviderCapabilitySupport }) {
+  const Icon =
+    state === "supported"
+      ? CircleCheckIcon
+      : state === "unknown"
+        ? CircleDashedIcon
+        : CircleAlertIcon;
+  return (
+    <span
+      className={`inline-flex items-center gap-1 text-xs ${capabilityChipClass(state)}`}
+      data-testid={`provider-capability-${label.toLowerCase().replace(/\s+/g, "-")}`}
+      title={
+        state === "supported"
+          ? "Supported"
+          : state === "unknown"
+            ? "Unknown — Omnigent cannot determine this yet"
+            : "Not supported by this provider integration"
+      }
+    >
+      <Icon
+        className={`size-3.5 shrink-0 ${
+          state === "supported" ? "text-emerald-600 dark:text-emerald-500" : ""
+        }`}
+      />
+      {label}
+      {state === "unknown" ? " (?)" : ""}
+    </span>
+  );
+}
+
+function ProviderRow({
+  provider,
+  manageHarness,
+  onManage,
+}: {
+  provider: ProviderInventoryEntry;
+  manageHarness: string | null;
+  onManage: (harness: string) => void;
+}) {
+  const valid = provider.configuration_state === "valid";
+  return (
+    <div
+      data-testid={`provider-row-${provider.id}`}
+      className="rounded-lg border border-border bg-card px-4 py-3"
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <CableIcon className="ui-icon shrink-0 text-muted-foreground" />
+            <span className="font-medium">{provider.display_name}</span>
+            <Badge variant="secondary" className="lowercase">
+              {provider.kind}
+            </Badge>
+            <Badge variant="outline">
+              {provider.origin === "detected" ? "Detected" : "Configured"}
+            </Badge>
+          </div>
+          <div className="mt-1.5 flex items-center gap-1.5 text-sm">
+            {valid ? (
+              <>
+                <CircleCheckIcon className="size-4 shrink-0 text-emerald-600 dark:text-emerald-500" />
+                <span>Configuration valid</span>
+              </>
+            ) : (
+              <>
+                <CircleAlertIcon className="size-4 shrink-0 text-amber-600 dark:text-amber-500" />
+                <span className="text-amber-600 dark:text-amber-500">Configuration invalid</span>
+              </>
+            )}
+          </div>
+          {provider.error && <p className="mt-1 text-sm text-muted-foreground">{provider.error}</p>}
+          <div className="mt-1.5 flex flex-wrap gap-x-4 gap-y-1 text-sm text-muted-foreground">
+            {provider.families.length > 0 && (
+              <span>
+                Families:{" "}
+                {provider.families
+                  .map(
+                    (family) =>
+                      `${family}${provider.default_models[family] ? ` (${provider.default_models[family]})` : ""}`,
+                  )
+                  .join(", ")}
+              </span>
+            )}
+            {provider.cli && <span>CLI: {provider.cli}</span>}
+            {provider.profile && <span>Profile: {provider.profile}</span>}
+            {provider.model_provider && <span>Gateway: {provider.model_provider}</span>}
+          </div>
+          <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1">
+            <CapabilityChip label="Model discovery" state={provider.capabilities.model_discovery} />
+            <CapabilityChip label="Usage status" state={provider.capabilities.usage_status} />
+            <CapabilityChip
+              label="Multiple profiles"
+              state={provider.capabilities.multiple_profiles}
+            />
+            <CapabilityChip label="Interactive CLI" state={provider.capabilities.interactive_cli} />
+          </div>
+        </div>
+        {manageHarness && (
+          <Button
+            variant="outline"
+            size="sm"
+            className="shrink-0"
+            onClick={() => onManage(manageHarness)}
+            data-testid={`provider-manage-${provider.id}`}
+          >
+            Manage
+          </Button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Providers section: read-only inventory of the model providers configured on
+ * or ambiently detected for the selected host — the same detection Omni Setup
+ * uses, surfaced via GET /v1/hosts/{id}/providers. Fetched on demand with a
+ * manual refresh (no background CLI polling), and credential material never
+ * crosses the host tunnel, so this surface is metadata-only by construction.
+ */
+function ProvidersSection() {
+  const { data: hosts, isLoading: hostsLoading } = useHosts();
+  const hostsList = hosts ?? [];
+  const [selectedHostId, setSelectedHostId] = useState<string | null>(null);
+  // Prefer the remembered host while it stays connected; otherwise the first.
+  const host = hostsList.find((h) => h.host_id === selectedHostId) ?? hostsList[0];
+  const inventory = useProviderInventory(host?.host_id, !!host);
+  const setupStepsByHarness = useHarnessSetupSteps();
+  // CLI-backed provider rows reuse the harness setup checklist as Manage.
+  const [manageHarness, setManageHarness] = useState<string | null>(null);
+
+  if (hostsLoading) {
+    return (
+      <Section title="Providers" description="Model providers connected to Omnigent.">
+        <p className="flex items-center gap-2 text-muted-foreground">
+          <Loader2Icon className="size-4 animate-spin" />
+          Loading hosts…
+        </p>
+      </Section>
+    );
+  }
+
+  if (hostsList.length === 0) {
+    return (
+      <Section title="Providers" description="Model providers connected to Omnigent.">
+        <p className="text-muted-foreground">
+          No host is connected yet. Start one with <code>omnigent host</code> to see its providers
+          here.
+        </p>
+      </Section>
+    );
+  }
+
+  const providers = inventory.data ?? [];
+
+  return (
+    <Section
+      title="Providers"
+      description="Model providers configured on or detected for your host — the same detection Omni Setup uses."
+    >
+      <div className="flex flex-col gap-4">
+        <div className="flex items-center gap-2">
+          {hostsList.length > 1 && (
+            <Select
+              value={host?.host_id ?? ""}
+              onValueChange={(id) => setSelectedHostId(id)}
+              name="provider-host"
+            >
+              <SelectTrigger data-testid="provider-host-select" className="w-56" aria-label="Host">
+                <SelectValue placeholder="Host" />
+              </SelectTrigger>
+              <SelectContent>
+                {hostsList.map((h) => (
+                  <SelectItem key={h.host_id} value={h.host_id}>
+                    {h.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
+          {hostsList.length === 1 && (
+            <span className="text-sm text-muted-foreground">Host: {host?.name}</span>
+          )}
+          <Button
+            variant="ghost"
+            size="sm"
+            className="gap-1.5"
+            onClick={() => void inventory.refetch()}
+            disabled={inventory.isFetching}
+            data-testid="provider-refresh"
+          >
+            <RefreshCwIcon className={`size-3.5 ${inventory.isFetching ? "animate-spin" : ""}`} />
+            Refresh
+          </Button>
+        </div>
+
+        {inventory.isLoading && (
+          <p
+            className="flex items-center gap-2 text-muted-foreground"
+            data-testid="provider-loading"
+          >
+            <Loader2Icon className="size-4 animate-spin" />
+            Loading providers…
+          </p>
+        )}
+
+        {inventory.isError && (
+          <div
+            className="rounded-lg border border-border bg-card px-4 py-3 text-sm"
+            data-testid="provider-error"
+          >
+            <div className="flex items-center gap-1.5">
+              <AlertTriangleIcon className="size-4 shrink-0 text-amber-600 dark:text-amber-500" />
+              <span>Couldn&apos;t load providers.</span>
+            </div>
+            <p className="mt-1 text-muted-foreground">
+              {inventory.error instanceof Error ? inventory.error.message : "Unknown error"}
+            </p>
+            <Button
+              variant="outline"
+              size="sm"
+              className="mt-2"
+              onClick={() => void inventory.refetch()}
+            >
+              Retry
+            </Button>
+          </div>
+        )}
+
+        {!inventory.isLoading && !inventory.isError && providers.length === 0 && (
+          <p className="text-muted-foreground" data-testid="provider-empty">
+            No providers configured or detected on this host yet. Run <code>omni setup</code> to
+            connect one.
+          </p>
+        )}
+
+        {providers.map((provider) => (
+          <ProviderRow
+            key={provider.id}
+            provider={provider}
+            manageHarness={providerManageHarness(provider, setupStepsByHarness)}
+            onManage={setManageHarness}
+          />
+        ))}
+      </div>
+
+      <HarnessSetupDialog
+        open={manageHarness !== null}
+        onOpenChange={(open) => {
+          if (!open) setManageHarness(null);
+        }}
+        agentName={manageHarness ?? undefined}
+        harness={manageHarness}
+        host={host}
+      />
     </Section>
   );
 }

@@ -14,6 +14,7 @@ import {
   GitBranchIcon,
   KeyboardIcon,
   PaletteIcon,
+  PlugIcon,
   Share2Icon,
   ShieldCheckIcon,
   TerminalIcon,
@@ -32,6 +33,7 @@ import { SIDEBAR_ROW } from "./sidebarStyles";
 export type SettingsSectionId =
   | "appearance"
   | "git"
+  | "providers"
   | "shortcuts"
   | "import"
   | "account"
@@ -45,6 +47,7 @@ export type SettingsSectionId =
 const SECTION_IDS: readonly SettingsSectionId[] = [
   "appearance",
   "git",
+  "providers",
   "shortcuts",
   "import",
   "account",
@@ -87,6 +90,9 @@ export function settingsNavGroups(
   const general: SettingsNavItem[] = [
     { id: "appearance", label: "Appearance", icon: PaletteIcon },
     { id: "git", label: "Git", icon: GitBranchIcon },
+    // Providers sits next to Git because it answers the same "what is Omnigent
+    // wired up to" question — for model backends instead of repositories.
+    { id: "providers", label: "Providers", icon: PlugIcon },
     { id: "shortcuts", label: "Keyboard shortcuts", icon: KeyboardIcon, hideOnMobile: true },
     { id: "import", label: "Import sessions", icon: DownloadIcon },
   ];
