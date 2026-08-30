@@ -66,6 +66,7 @@ import {
   defaultModelLabel,
   nativeModelLabel,
 } from "@/components/HarnessConfigControls";
+import { NewChatProviderStatus } from "@/shell/NewChatProviderStatus";
 import { ProjectLandingIcon } from "@/components/ProjectIconPicker";
 import {
   DropdownMenu,
@@ -1635,6 +1636,13 @@ function HarnessConfigModal({
         </DialogHeader>
 
         <div className="flex flex-col gap-5 py-1">
+          <ConfigRow
+            label="Provider"
+            description="Serves this agent on the selected host"
+            controlClassName="sm:w-80"
+          >
+            <NewChatProviderStatus host={host} harness={draftHarness ?? entryHarness} open={open} />
+          </ConfigRow>
           {!autoRouting && hasModelPicker && !hasPermission && (
             <>
               <ConfigRow label="Model" description="Underlying LLM" controlClassName="sm:w-80">

@@ -418,6 +418,12 @@ export interface ProviderInventoryEntry {
   profile: string | null;
   model_provider: string | null;
   capabilities: ProviderCapabilities;
+  /**
+   * Harnesses this provider would serve by default, resolved host-side by the
+   * same function a launch uses. Absent from older hosts — an empty list means
+   * "this host does not say", not "serves nothing".
+   */
+  default_for_harnesses?: string[];
   /** Absent from hosts predating connection states — treat as "unknown". */
   connection_state?: ProviderConnectionState;
   /** The host's own non-secret sentence explaining the state. */

@@ -70,6 +70,7 @@ def test_inventory_combines_configured_and_detected_providers_without_secrets() 
             },
             "connection_state": "unavailable",
             "connection_detail": "The claude CLI is not installed on this host.",
+            "default_for_harnesses": ["claude-native", "claude-sdk"],
         },
         {
             "id": "work",
@@ -94,6 +95,7 @@ def test_inventory_combines_configured_and_detected_providers_without_secrets() 
             },
             "connection_state": "connected",
             "connection_detail": "The openai credential resolves.",
+            "default_for_harnesses": ["codex-native", "codex", "openai-agents", "pi-native", "pi"],
         },
     ]
     serialized = repr(rows)
@@ -309,3 +311,38 @@ def test_unparseable_provider_rows_are_misconfigured_rather_than_unknown() -> No
 
     assert row["connection_state"] == "misconfigured"
     assert row["connection_detail"]
+
+
+def test_rows_name_the_harnesses_they_would_serve() -> None:
+    # The picker must not re-derive harness→provider from families itself.
+    config: dict[str, object] = {
+        "providers": {
+            "claude": {"kind": "subscription", "cli": "claude", "default": "anthropic"},
+            "work": {
+                "kind": "gateway",
+                "default": "openai",
+                "openai": {"base_url": "https://gateway.example/v1", "api_key": "k"},
+            },
+        }
+    }
+
+    rows = {row.provider_id: row for row in build_provider_inventory(config, detected=[])}
+
+    assert rows["claude"].default_for_harnesses == ("claude-native", "claude-sdk")
+    assert "codex-native" in rows["work"].default_for_harnesses
+    assert "claude-native" not in rows["work"].default_for_harnesses
+
+
+def test_a_provider_that_is_nobodys_default_names_no_harness() -> None:
+    config: dict[str, object] = {
+        "providers": {
+            "spare": {
+                "kind": "gateway",
+                "openai": {"base_url": "https://spare.example/v1", "api_key": "k"},
+            }
+        }
+    }
+
+    [row] = build_provider_inventory(config, detected=[])
+
+    assert row.default_for_harnesses == ()

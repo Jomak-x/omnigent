@@ -79,6 +79,11 @@ vi.mock("@/hooks/useHosts", () => ({
   useInstallingHarnesses: vi.fn(() => new Set<string>()),
   useStoreCredential: vi.fn(() => ({ mutate: vi.fn(), isPending: false })),
   useDetectedCredentials: vi.fn(() => ({ data: [] })),
+  // The config modal names the provider that will serve the agent; inert by
+  // default so tests that don't exercise it need no wiring.
+  useProviderInventory: vi.fn(() => ({ data: [] })),
+  useProviderUsage: vi.fn(() => ({ data: null })),
+  useRefreshProviderUsage: vi.fn(() => ({ mutate: vi.fn(), isPending: false })),
 }));
 // The setup dialog's copyable command rows call copyText; stub it so a click
 // can be asserted without touching the real clipboard.

@@ -75,6 +75,7 @@ _PROVIDER = {
     },
     "connection_state": "authentication_required",
     "connection_detail": "The claude CLI is installed but has no credential yet.",
+    "default_for_harnesses": ["claude-native", "claude-sdk"],
 }
 _USAGE = {
     "provider_id": "codex",
