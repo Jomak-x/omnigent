@@ -2189,6 +2189,12 @@ class UpdateSessionRequest(BaseModel):
         session from the default sidebar listing), ``False`` unarchives,
         ``None`` leaves unchanged. Owner-only (unlike ``title``, which
         needs only edit access).
+    :param provider_override: Set the session's provider pin — the
+        ``providers:`` config key it launches on, e.g. ``"codex-work"``.
+        Written by the runner when a routing policy moved the session onto a
+        different account, so the choice is visible and a resume stays put.
+        An explicit ``null`` clears the pin back to the configured default;
+        omitting the field leaves it unchanged.
     :param project_id: File this session into a first-class project (see
         ``designs/PROJECTS_PRD.md``). A non-empty id moves the session into
         that project; the empty string ``""`` unfiles it. **Omitting** the
@@ -2208,6 +2214,7 @@ class UpdateSessionRequest(BaseModel):
     permission_mode: str | None = None
     cost_control_mode_override: str | None = None
     subagent_routing_override: str | None = None
+    provider_override: str | None = None
     external_session_id: str | None = None
     terminal_launch_args: list[str] | None = None
     archived: bool | None = None

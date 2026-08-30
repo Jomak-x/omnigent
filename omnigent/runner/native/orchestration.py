@@ -58,6 +58,7 @@ from omnigent.native_coding_agents import (
 from omnigent.native_dispatch import resolve_hook
 from omnigent.process_logging import process_log_reference
 from omnigent.provider_override import validate_provider_override
+from omnigent.provider_selection import choose_provider_for_harness
 from omnigent.runner.resource_registry import (
     ANTIGRAVITY_NATIVE_TERMINAL_ROLE,
     CLAUDE_NATIVE_TERMINAL_ROLE,
@@ -1076,6 +1077,41 @@ async def _codex_native_launch_config(
         routing_enabled=routing_class.routing_enabled,
         turn_routing=routing_class.turn_routing,
     )
+
+
+async def _persist_routed_provider(
+    *,
+    session_id: str,
+    provider: str,
+    reason: str | None,
+    server_client: httpx.AsyncClient | None,
+) -> None:
+    """Record the provider a routing decision moved this session onto.
+
+    Written as the session's own pin, so the choice is visible in the session
+    snapshot (and the UI reading it) and a later resume launches on the same
+    account rather than being routed a second time. Best-effort: a failed write
+    must not abort a launch that has already been resolved.
+    """
+    _logger.warning("provider routing: session %s -> %s (%s)", session_id, provider, reason)
+    if server_client is None:
+        return
+    try:
+        resp = await server_client.patch(
+            f"/v1/sessions/{urllib.parse.quote(session_id, safe='')}",
+            json={"provider_override": provider},
+            timeout=10.0,
+        )
+        if resp.status_code >= 400:
+            _logger.warning(
+                "provider routing: could not persist the choice for %s (HTTP %s)",
+                session_id,
+                resp.status_code,
+            )
+    except httpx.HTTPError:
+        _logger.warning(
+            "provider routing: could not persist the choice for %s", session_id, exc_info=True
+        )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -3826,13 +3862,29 @@ async def _auto_create_codex_terminal(
     # Thread the spec so its executor.auth / legacy profile win over
     # machine-level config, parity with the in-process harness (#2744).
     _launch_spec = agent_spec.spec if isinstance(agent_spec, ResolvedSpec) else agent_spec
+    # An explicit pin is honoured as-is; without one, a configured routing
+    # policy may move this session past an exhausted or signed-out account.
+    # With no policy this returns None and resolution is exactly as before.
+    _provider_selection = await choose_provider_for_harness(
+        "codex-native",
+        pinned=launch_config.provider_override,
+    )
     _codex_launch = resolve_native_codex_launch(
         model=default_model,
         spec=_launch_spec,
         # The user's explicit account pick for this session outranks the
         # machine default and the spec's own credential.
-        provider_name=launch_config.provider_override,
+        provider_name=(_provider_selection.provider if _provider_selection is not None else None),
     )
+    if _provider_selection is not None and _provider_selection.moved_from is not None:
+        # Persist the account this session actually landed on, so the UI shows
+        # it and a later resume stays put instead of being routed again.
+        await _persist_routed_provider(
+            session_id=session_id,
+            provider=_provider_selection.provider,
+            reason=_provider_selection.reason,
+            server_client=server_client,
+        )
     _session_meta_provider = codex_session_meta_model_provider(_codex_launch)
     from omnigent.inner.codex_executor import _find_codex_cli
 

@@ -39,6 +39,7 @@ from omnigent.entities import (
 from omnigent.entities.permission import SessionPermission
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.model_override import validate_model_override
+from omnigent.provider_override import validate_provider_override
 from omnigent.reasoning_effort import (
     EFFORT_CLEAR_VALUES,
     EFFORT_VALUES,
@@ -1767,6 +1768,21 @@ def register_core_routes(
             body.subagent_routing_override
         )
 
+        # Provider pin: presence is the clear signal, like the switches above —
+        # an explicit null returns the session to the configured default.
+        clear_provider = (
+            "provider_override" in body.model_fields_set and body.provider_override is None
+        )
+        provider_override = body.provider_override
+        if provider_override is not None:
+            try:
+                provider_override = validate_provider_override(provider_override)
+            except ValueError as exc:
+                raise OmnigentError(
+                    f"invalid provider_override: {exc}",
+                    code=ErrorCode.INVALID_INPUT,
+                ) from exc
+
         # Native-terminal pass-through args: ``None`` leaves them
         # unchanged; a provided list (including ``[]``) replaces the
         # stored value wholesale (resume is last-write-wins, never an
@@ -1876,6 +1892,8 @@ def register_core_routes(
                 None if clear_subagent_routing else subagent_routing_override
             ),
             _unset_subagent_routing_override=clear_subagent_routing,
+            provider_override=None if clear_provider else provider_override,
+            _unset_provider_override=clear_provider,
             terminal_launch_args=terminal_launch_args,
             archived=body.archived,
         )
