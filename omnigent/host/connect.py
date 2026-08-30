@@ -107,6 +107,7 @@ from omnigent.onboarding.harness_readiness import (
     harness_is_configured,
 )
 from omnigent.onboarding.provider_config import ANTHROPIC_FAMILY, OPENAI_FAMILY
+from omnigent.onboarding.provider_inventory import build_provider_inventory
 from omnigent.process_logging import (
     LOG_TTY_FD_ENV_VAR,
     PROCESS_LOG_FILE_ENV_VAR,
@@ -2466,12 +2467,22 @@ class HostProcess:
         :param frame: The detect request (carries only a request id).
         :returns: Result frame with the non-secret credential descriptors.
         """
-        detected = detect_adoptable_credentials()
+        try:
+            detected = detect_adoptable_credentials()
+        except Exception:  # a status read must always settle
+            _logger.exception("Failed to detect adoptable credentials")
+            detected = []
+        try:
+            providers = [entry.as_dict() for entry in build_provider_inventory()]
+        except Exception:  # malformed config must not hang the UI
+            _logger.exception("Failed to build provider inventory")
+            providers = []
         return HostDetectCredentialsResultFrame(
             request_id=frame.request_id,
             credentials=[
                 {"family": d.family, "source": d.source, "env_var": d.env_var} for d in detected
             ],
+            providers=providers,
         )
 
     def _handle_fs_request(self, frame: HostFsRequestFrame) -> HostFsResultFrame:
