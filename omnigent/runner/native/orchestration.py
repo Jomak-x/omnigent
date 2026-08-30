@@ -3876,9 +3876,10 @@ async def _auto_create_codex_terminal(
         # machine default and the spec's own credential.
         provider_name=(_provider_selection.provider if _provider_selection is not None else None),
     )
-    if _provider_selection is not None and _provider_selection.moved_from is not None:
-        # Persist the account this session actually landed on, so the UI shows
-        # it and a later resume stays put instead of being routed again.
+    if _provider_selection is not None and launch_config.provider_override is None:
+        # Persist the account this routing policy selected, including its first
+        # candidate. A structured mid-turn limit error can then refresh that
+        # exact account, and a later resume stays on the same selection.
         await _persist_routed_provider(
             session_id=session_id,
             provider=_provider_selection.provider,

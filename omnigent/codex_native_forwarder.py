@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import re
 from collections.abc import Callable
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -231,6 +232,7 @@ _CODEX_AUTH_ERROR_FRAGMENTS = (
     "api key",
 )
 _CODEX_ERROR_KIND_AUTH = "auth"
+_CODEX_ERROR_KIND_USAGE_LIMIT = "usage_limit"
 _CODEX_ERROR_KIND_GENERIC = "generic"
 _CODEX_REAUTH_HINT = "Codex needs you to re-authenticate. Run `codex login` and retry."
 
@@ -898,7 +900,8 @@ class _CodexTerminalError:
 
     :param message: Human-readable error text, e.g.
         ``"401 Unauthorized: ChatGPT login expired"``.
-    :param kind: Classification, either ``"auth"`` or ``"generic"``.
+    :param kind: Classification: ``"auth"``, ``"usage_limit"``, or
+        ``"generic"``.
     """
 
     message: str
@@ -908,6 +911,11 @@ class _CodexTerminalError:
     def is_auth(self) -> bool:
         """:returns: ``True`` when the error was classified as auth-related."""
         return self.kind == _CODEX_ERROR_KIND_AUTH
+
+    @property
+    def is_usage_limit(self) -> bool:
+        """:returns: ``True`` for Codex's structured usage-limit signal."""
+        return self.kind == _CODEX_ERROR_KIND_USAGE_LIMIT
 
 
 def _classify_codex_error(error: _JsonObject, message: str) -> str:
@@ -921,8 +929,7 @@ def _classify_codex_error(error: _JsonObject, message: str) -> str:
 
     :param error: The ``turn.error`` object.
     :param message: Its already-extracted message text.
-    :returns: :data:`_CODEX_ERROR_KIND_AUTH` or
-        :data:`_CODEX_ERROR_KIND_GENERIC`.
+    :returns: The auth, usage-limit, or generic error kind.
     """
     info = error.get("codexErrorInfo")
     variant: str | None = None
@@ -932,9 +939,12 @@ def _classify_codex_error(error: _JsonObject, message: str) -> str:
     elif isinstance(info, dict):
         variant = info.get("type") or info.get("kind") or info.get("variant")
         http_status = info.get("httpStatusCode")
+    normalized_variant = "" if variant is None else re.sub(r"[^a-z0-9]", "", variant.lower())
     variant_is_auth = variant is not None and variant.lower() in _CODEX_AUTH_ERROR_INFO
     if variant_is_auth or http_status in _CODEX_AUTH_HTTP_STATUS:
         return _CODEX_ERROR_KIND_AUTH
+    if normalized_variant == "usagelimitexceeded":
+        return _CODEX_ERROR_KIND_USAGE_LIMIT
     lowered = message.lower()
     if any(fragment in lowered for fragment in _CODEX_AUTH_ERROR_FRAGMENTS):
         return _CODEX_ERROR_KIND_AUTH
@@ -6031,6 +6041,10 @@ async def _post_turn_status_edge(
     reauth_required = False
     if edge.error is not None:
         output = edge.error.message
+        if edge.error.is_usage_limit:
+            from omnigent.provider_usage_refresh import schedule_session_provider_usage_refresh
+
+            schedule_session_provider_usage_refresh(client, session_id)
         if edge.error.is_auth:
             reauth_required = True
             output = f"{output}\n\n{_CODEX_REAUTH_HINT}"

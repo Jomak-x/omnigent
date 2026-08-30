@@ -102,17 +102,22 @@ provider pin. It is therefore visible wherever the session's provider is shown,
 and a later resume stays on that account instead of being routed a second time.
 Every move is logged with the account it left, why, and where it went.
 
-### What failover does not do yet
+### Mid-turn limit recovery
 
-It decides **at launch**, not mid-turn. A session already running on an account
-that hits its limit surfaces the vendor's own error; it does not hot-swap to
-another account, which for a native TUI would mean relaunching the terminal
-under it. The signal for that exists — Codex reports `usage_limit_exceeded` in
-`codexErrorInfo` (structured, no string matching), and the SDK harnesses map
-`RateLimitError` in `omnigent/runtime/harnesses/_executor_adapter.py`. Wiring it
-would mean marking the account spent in the usage cache from the runner process
-(the cache lives host-side), then letting the next launch route. That crossing
-is the open design question, and the reason this half is not built.
+A running turn is not hot-swapped. Relaunching a native terminal under another
+account would lose or replay in-flight state, so the failed turn still surfaces
+the vendor's own error. Instead, a structured limit signal (`codexErrorInfo`
+for native Codex, or the SDK's `RateLimitError` classification) triggers a
+best-effort refresh over the existing runner → server → host usage route. The
+host bypasses its per-account cache and asks the vendor again; only that vendor
+reading can mark the account exhausted. No error-message matching and no
+synthetic percentage are used.
+
+An active routing policy records even its first selected account on the session,
+so the refresh targets the account that actually failed. The next unpinned
+launch then follows the existing launch-time policy and moves if the refreshed
+vendor reading reports exhaustion. An explicitly pinned session remains pinned,
+and a provider that does not report a spent state is never skipped.
 
 ## Setting up a second account by hand
 

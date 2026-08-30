@@ -1219,6 +1219,17 @@ _CONTEXT_OVERFLOW_PATTERNS = (
 )
 
 
+def _is_provider_rate_limit_error(event: _JsonObject) -> bool:
+    """Return whether a failed SDK turn carries its structured limit code."""
+    if event.get("type") != "response.failed":
+        return False
+    error = event.get("error")
+    if not isinstance(error, dict):
+        response = event.get("response")
+        error = response.get("error") if isinstance(response, dict) else None
+    return isinstance(error, dict) and error.get("code") == "rate_limit_exceeded"
+
+
 def _is_context_overflow_error(event: _JsonObject) -> tuple[int, int] | None:
     """
     Check if a ``response.failed`` SSE event indicates a context-window overflow.
@@ -7349,6 +7360,14 @@ def create_runner_app(
                                         if isinstance(_err, dict)
                                         else {"message": "harness turn failed"}
                                     )
+                                    if _is_provider_rate_limit_error(event):
+                                        from omnigent.provider_usage_refresh import (
+                                            schedule_session_provider_usage_refresh,
+                                        )
+
+                                        schedule_session_provider_usage_refresh(
+                                            server_client, conv_id
+                                        )
                                 elif _evt_type == "response.output_item.done":
                                     _item = event.get("item")
                                     if isinstance(_item, dict):

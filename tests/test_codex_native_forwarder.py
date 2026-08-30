@@ -44,6 +44,14 @@ class _RecordingClient:
         """Initialize with an empty record of posts."""
         self.posts: list[tuple[str, dict]] = []
 
+    async def get(self, url: str, **_kwargs: object) -> httpx.Response:
+        """Return a session without a provider pin for best-effort refreshes."""
+        return httpx.Response(
+            200,
+            json={"host_id": "host_x", "provider_override": None},
+            request=httpx.Request("GET", url),
+        )
+
     async def post(self, url: str, *, json: dict) -> httpx.Response:
         """
         Record ``(url, json)`` and return a 200 response.
@@ -956,6 +964,8 @@ def test_classify_codex_error_auth_vs_generic() -> None:
     # Message-text fallback when codexErrorInfo is absent.
     assert fwd._classify_codex_error({}, "Please run codex login") == auth
     assert fwd._classify_codex_error({}, "ChatGPT session expired") == auth
+    # Limit text alone is not a routing signal; only codexErrorInfo is trusted.
+    assert fwd._classify_codex_error({}, "You've hit your usage limit") == generic
     assert fwd._classify_codex_error({"codexErrorInfo": "Other"}, "disk full") == generic
 
 
@@ -1042,7 +1052,7 @@ def test_terminal_error_from_notification_reads_usage_limit() -> None:
 
     assert error is not None
     assert error.message == "You've hit your usage limit."
-    assert error.kind == fwd._CODEX_ERROR_KIND_GENERIC
+    assert error.kind == fwd._CODEX_ERROR_KIND_USAGE_LIMIT
 
 
 @pytest.mark.asyncio
