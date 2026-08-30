@@ -47,6 +47,7 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Literal
 
 from omnigent.cli_invocation import cli_invocation
@@ -391,6 +392,13 @@ class ProviderEntry:
         provider id in the CLI's config file that the launch pins, i.e. the
         ``X`` in ``[model_providers.X]``, e.g. ``"Databricks"``. ``None``
         otherwise.
+    :param cli_home: For CLI-backed kinds (``subscription`` / ``cli-config``):
+        the CLI's own home directory this provider authenticates from, e.g.
+        ``"~/.codex-work"``. This is what makes two accounts of the same vendor
+        distinguishable — each provider entry names its own credential root, and
+        a launch bridges auth from the one its provider declares. ``None`` (the
+        default) keeps the CLI's standard home, so an existing config behaves
+        exactly as before.
     :param display_name: For ``kind="cli-config"`` only: the provider's
         human display name (the table's ``name`` field, snapshotted at
         adoption), e.g. ``"Databricks AI Gateway"``. ``None`` otherwise and
@@ -414,6 +422,7 @@ class ProviderEntry:
     profile: str | None = None
     model_provider: str | None = None
     display_name: str | None = None
+    cli_home: str | None = None
     default_families: frozenset[str] = frozenset()
 
     @property
@@ -895,6 +904,47 @@ def _default_raw_value(default_families: frozenset[str], served: set[str]) -> ob
     return sorted(default_families)
 
 
+def _parse_cli_home(name: str, raw: dict[str, object]) -> str | None:
+    """Parse a CLI-backed provider's own credential home.
+
+    Kept as the raw (unexpanded) string on the entry so the config round-trips
+    verbatim; :func:`provider_cli_home` resolves ``~`` and ``$VAR`` at use time,
+    when the launching process's environment is the one that matters.
+
+    :param name: The provider name, for error messages.
+    :param raw: The raw provider mapping.
+    :returns: The declared home, or ``None`` when the entry names none.
+    :raises OmnigentError: When ``cli_home`` is present but not a non-empty
+        string — a silently ignored typo here would send a session to the wrong
+        account's credentials.
+    """
+    value = raw.get("cli_home")
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise OmnigentError(
+            f"provider {name!r}: 'cli_home' must be a non-empty path, got {value!r}.",
+            code=ErrorCode.INVALID_INPUT,
+        )
+    return value.strip()
+
+
+def provider_cli_home(entry: ProviderEntry) -> Path | None:
+    """Resolve a provider's declared CLI home to an absolute path.
+
+    :param entry: The parsed provider.
+    :returns: The expanded, absolute home, or ``None`` when the provider
+        declares none (the CLI's standard home then applies).
+    :raises OmnigentError: If the path references an unset environment
+        variable — failing loud beats silently authenticating as the wrong
+        account.
+    """
+    if entry.cli_home is None:
+        return None
+    expanded = _expand(f"providers.{entry.name}.cli_home", entry.cli_home)
+    return Path(expanded).expanduser()
+
+
 def _parse_provider(name: str, raw: dict[str, object]) -> ProviderEntry:
     """Parse one entry under ``providers:`` into a :class:`ProviderEntry`.
 
@@ -953,6 +1003,7 @@ def _parse_provider(name: str, raw: dict[str, object]) -> ProviderEntry:
             name=name,
             kind=kind,
             cli=cli_raw,
+            cli_home=_parse_cli_home(name, raw),
             default_families=_parse_default_families(
                 name, default_raw, served, pi_capable=(cli_raw == "pi")
             ),
@@ -984,6 +1035,7 @@ def _parse_provider(name: str, raw: dict[str, object]) -> ProviderEntry:
             cli=cli_raw,
             model_provider=model_provider_raw,
             display_name=display_name_raw if isinstance(display_name_raw, str) else None,
+            cli_home=_parse_cli_home(name, raw),
             # A codex cli-config provider serves the openai surface, like a codex
             # subscription. It may ALSO claim the pi scope (``default: [openai,
             # pi]``) because a Databricks AI Gateway is pi-consumable (Pi speaks

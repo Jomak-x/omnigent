@@ -4122,6 +4122,11 @@ async def _auto_create_codex_terminal(
         # creating a thread. This TUI runs detached for the web UI, so persist
         # the runner-owned acknowledgements in the private session config.
         trust_project=True,
+        # Bridge auth/config from the home this launch's provider names, so a
+        # second account's session does not read the first account's login.
+        config_source_home=(
+            Path(_codex_launch.cli_home) if _codex_launch.cli_home is not None else None
+        ),
     )
     # Generate routing hooks.json (and bypass codex's hook-trust prompt): the
     # app-server reads the endpoint out of its own process env at start, and

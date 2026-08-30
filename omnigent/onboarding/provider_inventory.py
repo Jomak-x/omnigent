@@ -40,6 +40,7 @@ from omnigent.onboarding.provider_config import (
     default_provider_for_harness,
     load_config,
     load_providers,
+    provider_cli_home,
     provider_families,
     resolve_secret,
 )
@@ -115,6 +116,19 @@ _CLI_READINESS_HARNESS: dict[str, str] = {
 }
 
 
+def _resolved_cli_home(provider: ProviderEntry) -> str | None:
+    """Expand a provider's declared CLI home, or ``None`` when it names none.
+
+    An unresolvable path yields ``None`` here; the connection state reports it
+    as misconfigured, so the failure is surfaced once rather than twice.
+    """
+    try:
+        home = provider_cli_home(provider)
+    except OmnigentError:
+        return None
+    return str(home) if home is not None else None
+
+
 def _cli_connection(
     provider: ProviderEntry,
     readiness: Mapping[str, HarnessAvailability] | None,
@@ -129,6 +143,14 @@ def _cli_connection(
     "a usable credential" rather than naming the login.
     """
     cli = provider.cli
+    if provider.cli_home is not None:
+        try:
+            provider_cli_home(provider)
+        except OmnigentError:
+            return _connection(
+                ConnectionState.MISCONFIGURED,
+                "This provider's cli_home references an environment variable that is not set.",
+            )
     if cli is None:  # a malformed entry that parsed anyway
         return _connection(
             ConnectionState.UNKNOWN,
@@ -356,6 +378,9 @@ class ProviderInventoryEntry:
     connection_state: ConnectionState
     connection_detail: str
     default_for_harnesses: tuple[str, ...] = ()
+    # Host-side only, deliberately absent from ``as_dict``: a credential root
+    # is the host's business, and the frontend has no use for the path.
+    cli_home: str | None = None
 
     def as_dict(self) -> JsonObject:
         """Return the public API representation."""
@@ -410,8 +435,14 @@ def provider_capabilities(provider: ProviderEntry) -> ProviderCapabilities:
     )
     if provider.kind == DATABRICKS_KIND:
         multiple_profiles = CapabilitySupport.SUPPORTED
-    elif provider.kind == SUBSCRIPTION_KIND:
-        multiple_profiles = CapabilitySupport.UNSUPPORTED
+    elif provider.kind in (SUBSCRIPTION_KIND, CLI_CONFIG_KIND):
+        # A CLI-backed provider can hold a second account only where the launch
+        # honours a per-provider ``cli_home``; codex does, the others do not yet.
+        multiple_profiles = (
+            CapabilitySupport.SUPPORTED
+            if provider.cli == "codex"
+            else CapabilitySupport.UNSUPPORTED
+        )
     else:
         multiple_profiles = CapabilitySupport.UNKNOWN
     return ProviderCapabilities(
@@ -565,6 +596,7 @@ def build_provider_inventory(
                 connection_state=connection.state,
                 connection_detail=connection.detail,
                 default_for_harnesses=default_harnesses.get(provider.name, ()),
+                cli_home=_resolved_cli_home(provider),
             )
         )
     return inventory

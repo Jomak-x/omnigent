@@ -43,7 +43,9 @@ async def generate_background_title(context: BackgroundTitleContext) -> str | No
         title_workdir.mkdir()
         _populate_codex_home_config(
             codex_home,
-            _codex_home_config_source_from_env(),
+            Path(launch.cli_home)
+            if launch.cli_home is not None
+            else _codex_home_config_source_from_env(),
             minimal_config=True,
         )
         native_server = build_codex_native_server(
@@ -54,6 +56,7 @@ async def generate_background_title(context: BackgroundTitleContext) -> str | No
             profile=launch.profile,
             bridge_dir=temp_root / "bridge",
             extra_config_overrides=launch.config_overrides,
+            config_source_home=Path(launch.cli_home) if launch.cli_home is not None else None,
         )
         native_server.config_overrides = materialize_codex_provider_config(
             codex_home,

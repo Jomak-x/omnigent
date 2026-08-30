@@ -2528,7 +2528,11 @@ class HostProcess:
             )
         from omnigent.codex_usage import codex_usage_status
 
-        status = await codex_usage_status(frame.provider_id, refresh=frame.refresh)
+        status = await codex_usage_status(
+            frame.provider_id,
+            refresh=frame.refresh,
+            codex_home=row.cli_home,
+        )
         return HostProviderUsageResultFrame(
             request_id=frame.request_id,
             status="ok",

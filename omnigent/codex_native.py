@@ -137,6 +137,30 @@ class _CodexAuthSource:
     config_path: Path
 
 
+def _default_codex_provider_home() -> Path | None:
+    """Return the Codex home the configured default codex provider names.
+
+    Readiness must judge the account a launch would actually use: with a
+    ``cli_home`` on the default provider, the standard ``~/.codex`` may hold a
+    different account's login (or none). Fails safe to ``None`` — the
+    process-wide home — because a readiness check must never raise.
+    """
+    try:
+        from omnigent.onboarding.provider_config import (
+            default_provider_for_harness,
+            load_config,
+            provider_cli_home,
+        )
+
+        provider = default_provider_for_harness(load_config(), "codex-native")
+        if provider is None or provider.cli != "codex":
+            return None
+        return provider_cli_home(provider)
+    except Exception:  # noqa: BLE001 - readiness never raises; use the default home
+        _logger.debug("codex readiness: provider home lookup failed", exc_info=True)
+        return None
+
+
 def _resolve_codex_auth_source() -> _CodexAuthSource:
     """
     Resolve the local Codex auth source used for availability checks.
@@ -151,7 +175,7 @@ def _resolve_codex_auth_source() -> _CodexAuthSource:
     """
     from omnigent.inner.codex_executor import _codex_home_config_source_from_env
 
-    codex_home = _codex_home_config_source_from_env()
+    codex_home = _default_codex_provider_home() or _codex_home_config_source_from_env()
     return _CodexAuthSource(
         auth_path=codex_home / "auth.json",
         config_path=codex_home / "config.toml",
@@ -1253,6 +1277,9 @@ async def _prepare_codex_terminal(
             ap_server_url=base_url,
             ap_auth_headers=headers,
             developer_instructions=developer_instructions,
+            config_source_home=(
+                Path(_codex_launch.cli_home) if _codex_launch.cli_home is not None else None
+            ),
         )
         app_server.listen_url = codex_ws_url
         event_client: CodexAppServerClient | None = None

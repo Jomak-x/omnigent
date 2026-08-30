@@ -2983,7 +2983,7 @@ async def test_provider_usage_reads_codex_limits(monkeypatch: pytest.MonkeyPatch
     import omnigent.host.connect as connect
     from omnigent.onboarding.provider_usage import ProviderUsageStatus, UsageState, UsageWindow
 
-    row = SimpleNamespace(provider_id="codex", cli="codex")
+    row = SimpleNamespace(provider_id="codex", cli="codex", cli_home="/home/u/.codex-work")
     monkeypatch.setattr(connect, "build_provider_inventory", lambda **_kwargs: [row])
     status = ProviderUsageStatus(
         provider_id="codex",
@@ -2993,8 +2993,10 @@ async def test_provider_usage_reads_codex_limits(monkeypatch: pytest.MonkeyPatch
     )
     seen: dict[str, object] = {}
 
-    async def _usage(provider_id: str, *, refresh: bool = False) -> ProviderUsageStatus:
-        seen.update({"provider_id": provider_id, "refresh": refresh})
+    async def _usage(
+        provider_id: str, *, refresh: bool = False, codex_home: str | None = None
+    ) -> ProviderUsageStatus:
+        seen.update({"provider_id": provider_id, "refresh": refresh, "codex_home": codex_home})
         return status
 
     monkeypatch.setattr("omnigent.codex_usage.codex_usage_status", _usage)
@@ -3006,7 +3008,12 @@ async def test_provider_usage_reads_codex_limits(monkeypatch: pytest.MonkeyPatch
 
     assert result.status == "ok"
     assert result.usage == status.as_dict()
-    assert seen == {"provider_id": "codex", "refresh": True}
+    # The probe must read the account this provider names, not the default home.
+    assert seen == {
+        "provider_id": "codex",
+        "refresh": True,
+        "codex_home": "/home/u/.codex-work",
+    }
 
 
 async def test_provider_usage_for_a_vendor_without_limits_reports_unknown(

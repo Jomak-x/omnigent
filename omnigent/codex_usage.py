@@ -100,10 +100,13 @@ async def _wait_for_listener(process: asyncio.subprocess.Process, port: int) -> 
     raise TimeoutError("Timed out waiting for the Codex usage probe app-server")
 
 
-async def read_codex_rate_limits(*, codex_path: str) -> JsonObject:
+async def read_codex_rate_limits(*, codex_path: str, codex_home: str | None = None) -> JsonObject:
     """Ask a short-lived Codex app-server for the account's rate limits.
 
     :param codex_path: The Codex executable to run.
+    :param codex_home: The Codex home to authenticate from — a provider's own
+        ``cli_home`` when it names one, so a second account's limits are read
+        from that account rather than the default home's.
     :returns: The raw ``rateLimits`` object from the app-server.
     :raises CodexAppServerResponseError: Codex refused the request (including
         a build that does not implement the method).
@@ -115,7 +118,7 @@ async def read_codex_rate_limits(*, codex_path: str) -> JsonObject:
     env = _clean_codex_env()
     # Read the same home the launch authenticates from, so the numbers describe
     # the account that would actually run the work.
-    env["CODEX_HOME"] = str(_codex_home_config_source_from_env())
+    env["CODEX_HOME"] = codex_home or str(_codex_home_config_source_from_env())
     port = _allocate_loopback_port()
     listen_url = f"ws://127.0.0.1:{port}"
     process = await asyncio.create_subprocess_exec(
@@ -233,7 +236,12 @@ def codex_usage_from_rate_limits(provider_id: str, rate_limits: JsonObject) -> P
     )
 
 
-async def codex_usage_status(provider_id: str, *, refresh: bool = False) -> ProviderUsageStatus:
+async def codex_usage_status(
+    provider_id: str,
+    *,
+    refresh: bool = False,
+    codex_home: str | None = None,
+) -> ProviderUsageStatus:
     """Return Codex's quota status for one provider row.
 
     Local readiness decides first: a missing CLI or an unauthenticated one is
@@ -242,6 +250,8 @@ async def codex_usage_status(provider_id: str, *, refresh: bool = False) -> Prov
 
     :param provider_id: The inventory row this describes.
     :param refresh: Skip the cache and take a fresh reading.
+    :param codex_home: The provider's own Codex home, when it names one. Part
+        of the cache key, so two accounts never serve each other's numbers.
     :returns: The status; never raises, because a status read must settle.
     """
     from omnigent.codex_native import _codex_auth_unavailable_reason, _find_codex_cli
@@ -266,13 +276,14 @@ async def codex_usage_status(provider_id: str, *, refresh: bool = False) -> Prov
             "The codex CLI is not installed on this host.",
             state=UsageState.PROVIDER_UNAVAILABLE,
         )
+    cache_key = f"{codex_path}\x00{codex_home or ''}"
     if not refresh:
-        cached = _usage_cache.get(codex_path)
+        cached = _usage_cache.get(cache_key)
         if cached is not None:
             # Keep the reading's own ``checked_at`` so the UI can say how old it is.
             return replace(cached, provider_id=provider_id)
     try:
-        rate_limits = await read_codex_rate_limits(codex_path=codex_path)
+        rate_limits = await read_codex_rate_limits(codex_path=codex_path, codex_home=codex_home)
     except CodexAppServerResponseError as exc:
         if exc.code in _UNSUPPORTED_METHOD_CODES:
             return unknown_usage(
@@ -285,7 +296,7 @@ async def codex_usage_status(provider_id: str, *, refresh: bool = False) -> Prov
         _logger.exception("Codex usage probe failed")
         return unknown_usage(provider_id, "The Codex usage probe failed on this host.")
     status = codex_usage_from_rate_limits(provider_id, rate_limits)
-    _usage_cache[codex_path] = status
+    _usage_cache[cache_key] = status
     return status
 
 

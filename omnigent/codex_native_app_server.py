@@ -1143,6 +1143,9 @@ class CodexNativeAppServer:
     codex_cli_version: tuple[int, int, int] | None = None
     trust_project: bool = False
     router_hooks_registered: bool = False
+    # The home whose auth/config this session bridges. ``None`` resolves the
+    # process-wide Codex home, so a config naming no home is unchanged.
+    config_source_home: Path | None = None
 
     async def start(self) -> None:
         """
@@ -1187,7 +1190,7 @@ class CodexNativeAppServer:
                 router_bridge_dir = None
         self.router_hooks_registered = router_bridge_dir is not None and policy_hooks_supported
         routed_spawns = router_bridge_dir is not None
-        config_source = _codex_home_config_source_from_env()
+        config_source = self.config_source_home or _codex_home_config_source_from_env()
         model_migration_target: str | None = None
         if self.trust_project and self.pinned_model:
             catalog = await asyncio.to_thread(
@@ -2145,6 +2148,7 @@ def build_codex_native_server(
     developer_instructions: str | None = None,
     bypass_sandbox: bool = False,
     trust_project: bool = False,
+    config_source_home: Path | None = None,
 ) -> CodexNativeAppServer:
     """
     Build a configured native Codex app-server process wrapper.
@@ -2166,6 +2170,10 @@ def build_codex_native_server(
         runs. ``None`` uses :data:`sys.executable`.
     :param codex_path: Optional executable override. ``None`` searches
         ``PATH``.
+    :param config_source_home: The Codex home to bridge auth/config from
+        (:attr:`NativeCodexLaunch.cli_home`), or ``None`` to resolve the
+        process-wide home. Passing the launch's own home is what keeps two
+        providers of the same CLI on two different accounts.
     :param extra_config_overrides: Additional ``-c`` config overrides
         appended after Databricks routing overrides, e.g. MCP server
         registration for the Omnigent tool relay.
@@ -2245,6 +2253,7 @@ def build_codex_native_server(
         python_executable=python_executable,
         pinned_model=pinned_model,
         trust_project=trust_project,
+        config_source_home=config_source_home,
     )
 
 
@@ -2266,12 +2275,18 @@ class NativeCodexLaunch:
         outcome (provider / profile / model, or the login-fallback state),
         set at resolution time and surfaced in the startup-timeout error so
         hosted users can diagnose without runner-log access (see #2745).
+    :param cli_home: The Codex home this launch bridges auth and config from,
+        when its provider declares one (``cli_home:`` in the provider entry).
+        ``None`` keeps the process-wide resolution, so a config that names no
+        home behaves exactly as before. This is what lets two providers of the
+        same CLI carry two different accounts.
     """
 
     config_overrides: list[str]
     model: str | None
     profile: str | None
     summary: str = ""
+    cli_home: str | None = None
 
 
 _MODEL_PROVIDER_OVERRIDE_PREFIX = "model_provider="
@@ -2501,6 +2516,9 @@ def _codex_provider_launch(entry: ProviderEntry, model: str | None) -> NativeCod
             summary=(
                 f"provider {entry.name!r} via cli-config (model_provider={entry.model_provider!r})"
             ),
+            # The provider table AND its credential live in this home's
+            # config.toml, so the launch must bridge from the one the entry names.
+            cli_home=(str(home) if (home := _provider_codex_home(entry)) is not None else None),
         )
     if entry.kind not in (KEY_KIND, GATEWAY_KIND, LOCAL_KIND):
         return None
@@ -2590,6 +2608,21 @@ def _first_routable_codex_provider(
     return None
 
 
+def _provider_codex_home(entry: ProviderEntry) -> Path | None:
+    """Return the Codex home *entry* authenticates from, if it names one.
+
+    A provider that declares no ``cli_home`` keeps the process-wide resolution,
+    so existing configs are unaffected. An unresolvable path fails the launch
+    rather than silently authenticating as whichever account happens to live in
+    the default home.
+    """
+    from omnigent.onboarding.provider_config import provider_cli_home
+
+    if entry.cli is not None and entry.cli != "codex":
+        return None
+    return provider_cli_home(entry)
+
+
 def _resolve_subscription_launch(
     entry: ProviderEntry, model: str | None, explicit: dict[str, object]
 ) -> NativeCodexLaunch:
@@ -2621,7 +2654,9 @@ def _resolve_subscription_launch(
     # Resolve against the same CODEX_HOME the native server bridges from
     # (``_populate_codex_home_config``) so this "is Codex logged in?" check reads
     # the exact auth.json the launched Codex process will use.
-    real_codex_home = _codex_home_config_source_from_env()
+    entry_home = _provider_codex_home(entry)
+    real_codex_home = entry_home or _codex_home_config_source_from_env()
+    cli_home = str(entry_home) if entry_home is not None else None
     if codex_auth_has_credential(real_codex_home / "auth.json"):
         log_info_once(
             _logger,
@@ -2633,6 +2668,7 @@ def _resolve_subscription_launch(
             model=model,
             profile=None,
             summary=f"Codex CLI login (subscription provider {entry.name!r}; Codex is logged in)",
+            cli_home=cli_home,
         )
     fallback = _first_routable_codex_provider(explicit, exclude=entry.name, model=model)
     if fallback is not None:
@@ -2652,6 +2688,7 @@ def _resolve_subscription_launch(
             "login and no alternative provider is configured) — the TUI likely renders "
             "the sign-in screen and never starts a thread"
         ),
+        cli_home=cli_home,
     )
 
 
@@ -2753,7 +2790,12 @@ def resolve_native_codex_launch(
                 # the spec did not name is worse than the login screen.
                 from omnigent.onboarding.ambient import codex_auth_has_credential
 
-                if codex_auth_has_credential(_codex_home_config_source_from_env() / "auth.json"):
+                # A spec-named provider may carry its own credential root, so
+                # judge (and launch against) that account rather than whichever
+                # one the default home holds.
+                spec_home = _provider_codex_home(spec_entry)
+                auth_home = spec_home or _codex_home_config_source_from_env()
+                if codex_auth_has_credential(auth_home / "auth.json"):
                     state = "Codex is logged in"
                 else:
                     state = (
@@ -2765,6 +2807,7 @@ def resolve_native_codex_launch(
                     model=model,
                     profile=None,
                     summary=f"Codex CLI login (spec provider {spec_entry.name!r}; {state})",
+                    cli_home=str(spec_home) if spec_home is not None else None,
                 )
             launch = _codex_provider_launch(spec_entry, model)
             if launch is not None:

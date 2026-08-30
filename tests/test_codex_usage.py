@@ -189,3 +189,25 @@ def test_cache_ttl_is_configurable(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setenv("OMNIGENT_PROVIDER_USAGE_TTL_S", "0")
     assert codex_usage._cache_ttl_seconds() == codex_usage._DEFAULT_CACHE_TTL_S
+
+
+def test_two_accounts_do_not_share_a_cached_reading(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A second profile must never be shown the first profile's quota."""
+    _patch_readiness(monkeypatch, None)
+    homes: list[str | None] = []
+
+    async def _probe(*, codex_path: str, codex_home: str | None = None) -> dict[str, Any]:
+        homes.append(codex_home)
+        return dict(_LIVE_RATE_LIMITS, planType="plus" if codex_home else "free")
+
+    monkeypatch.setattr(codex_usage, "read_codex_rate_limits", _probe)
+
+    async def _read_both() -> tuple[str | None, str | None]:
+        personal = await codex_usage.codex_usage_status("codex")
+        work = await codex_usage.codex_usage_status("codex-work", codex_home="/home/u/.codex-work")
+        return personal.plan, work.plan
+
+    personal_plan, work_plan = asyncio.run(_read_both())
+
+    assert homes == [None, "/home/u/.codex-work"]
+    assert (personal_plan, work_plan) == ("free", "plus")
