@@ -71,6 +71,8 @@ _PROVIDER = {
         "multiple_profiles": "unsupported",
         "interactive_cli": "supported",
     },
+    "connection_state": "authentication_required",
+    "connection_detail": "The claude CLI is installed but has no credential yet.",
 }
 
 

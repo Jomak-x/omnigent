@@ -105,6 +105,13 @@ import {
   type ProviderCapabilitySupport,
   type ProviderInventoryEntry,
 } from "@/hooks/useHosts";
+import {
+  providerConnectionState,
+  providerFetchLabel,
+  providerFetchState,
+  providerStatePresentation,
+  type ProviderStateTone,
+} from "@/lib/providerConnection";
 import { useHarnessSetupSteps } from "@/lib/agentLabels";
 import { HarnessSetupDialog } from "@/shell/HarnessSetupDialog";
 import { changePassword, logout } from "@/lib/accountsApi";
@@ -934,6 +941,27 @@ function providerManageHarness(
   return setupStepsByHarness[provider.cli] ? provider.cli : null;
 }
 
+const PROVIDER_TONE_TEXT: Record<ProviderStateTone, string> = {
+  ok: "",
+  warning: "text-amber-600 dark:text-amber-500",
+  error: "text-destructive",
+  muted: "text-muted-foreground",
+};
+
+const PROVIDER_TONE_ICON_CLASS: Record<ProviderStateTone, string> = {
+  ok: "text-emerald-600 dark:text-emerald-500",
+  warning: "text-amber-600 dark:text-amber-500",
+  error: "text-destructive",
+  muted: "text-muted-foreground",
+};
+
+/** The status glyph for a settled provider state. */
+function ProviderStateIcon({ tone }: { tone: ProviderStateTone }) {
+  const Icon =
+    tone === "ok" ? CircleCheckIcon : tone === "muted" ? CircleDashedIcon : CircleAlertIcon;
+  return <Icon className={`size-4 shrink-0 ${PROVIDER_TONE_ICON_CLASS[tone]}`} />;
+}
+
 function capabilityChipClass(state: ProviderCapabilitySupport): string {
   if (state === "supported") return "text-foreground";
   return "text-muted-foreground";
@@ -978,7 +1006,8 @@ function ProviderRow({
   manageHarness: string | null;
   onManage: (harness: string) => void;
 }) {
-  const valid = provider.configuration_state === "valid";
+  const state = providerConnectionState(provider);
+  const presentation = providerStatePresentation(state);
   return (
     <div
       data-testid={`provider-row-${provider.id}`}
@@ -996,20 +1025,20 @@ function ProviderRow({
               {provider.origin === "detected" ? "Detected" : "Configured"}
             </Badge>
           </div>
-          <div className="mt-1.5 flex items-center gap-1.5 text-sm">
-            {valid ? (
-              <>
-                <CircleCheckIcon className="size-4 shrink-0 text-emerald-600 dark:text-emerald-500" />
-                <span>Configuration valid</span>
-              </>
-            ) : (
-              <>
-                <CircleAlertIcon className="size-4 shrink-0 text-amber-600 dark:text-amber-500" />
-                <span className="text-amber-600 dark:text-amber-500">Configuration invalid</span>
-              </>
-            )}
+          <div
+            className="mt-1.5 flex items-center gap-1.5 text-sm"
+            data-testid={`provider-state-${provider.id}`}
+            data-state={state}
+          >
+            <ProviderStateIcon tone={presentation.tone} />
+            <span className={PROVIDER_TONE_TEXT[presentation.tone]}>{presentation.label}</span>
           </div>
-          {provider.error && <p className="mt-1 text-sm text-muted-foreground">{provider.error}</p>}
+          {/* A parse error is the more actionable sentence when both exist. */}
+          {(provider.error || provider.connection_detail) && (
+            <p className="mt-1 text-sm text-muted-foreground">
+              {provider.error || provider.connection_detail}
+            </p>
+          )}
           <div className="mt-1.5 flex flex-wrap gap-x-4 gap-y-1 text-sm text-muted-foreground">
             {provider.families.length > 0 && (
               <span>
@@ -1093,6 +1122,7 @@ function ProvidersSection() {
   }
 
   const providers = inventory.data ?? [];
+  const fetchState = providerFetchState(inventory);
 
   return (
     <Section
@@ -1135,28 +1165,28 @@ function ProvidersSection() {
           </Button>
         </div>
 
-        {inventory.isLoading && (
+        {fetchState.state === "connecting" && providers.length === 0 && (
           <p
             className="flex items-center gap-2 text-muted-foreground"
             data-testid="provider-loading"
+            data-state="connecting"
           >
             <Loader2Icon className="size-4 animate-spin" />
-            Loading providers…
+            Connecting to the host…
           </p>
         )}
 
-        {inventory.isError && (
+        {fetchState.state !== "connecting" && fetchState.state !== "ready" && (
           <div
             className="rounded-lg border border-border bg-card px-4 py-3 text-sm"
             data-testid="provider-error"
+            data-state={fetchState.state}
           >
             <div className="flex items-center gap-1.5">
               <AlertTriangleIcon className="size-4 shrink-0 text-amber-600 dark:text-amber-500" />
-              <span>Couldn&apos;t load providers.</span>
+              <span>{providerFetchLabel(fetchState.state)}</span>
             </div>
-            <p className="mt-1 text-muted-foreground">
-              {inventory.error instanceof Error ? inventory.error.message : "Unknown error"}
-            </p>
+            <p className="mt-1 text-muted-foreground">{fetchState.detail}</p>
             <Button
               variant="outline"
               size="sm"
@@ -1168,7 +1198,7 @@ function ProvidersSection() {
           </div>
         )}
 
-        {!inventory.isLoading && !inventory.isError && providers.length === 0 && (
+        {fetchState.state === "ready" && providers.length === 0 && (
           <p className="text-muted-foreground" data-testid="provider-empty">
             No providers configured or detected on this host yet. Run <code>omni setup</code> to
             connect one.

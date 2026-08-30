@@ -40,9 +40,10 @@ vi.mock("@/hooks/useHosts", () => ({
     return {
       data: mocks.providers,
       isLoading: mocks.inventoryLoading,
+      isPending: mocks.inventoryLoading,
       isError: mocks.inventoryError,
       error: mocks.inventoryErrorObj,
-      isFetching: false,
+      isFetching: mocks.inventoryLoading,
       refetch: mocks.refetch,
     };
   },
@@ -140,8 +141,15 @@ function provider(partial: Partial<ProviderInventoryEntry>): ProviderInventoryEn
       multiple_profiles: "unknown",
       interactive_cli: "supported",
     },
+    connection_state: "connected",
+    connection_detail: "The codex CLI is installed and reports a usable credential.",
     ...partial,
   };
+}
+
+/** Mirrors the status-carrying error `useProviderInventory` throws. */
+function httpError(status: number, message: string): Error {
+  return Object.assign(new Error(message), { status });
 }
 
 function renderPage(path = "/settings/providers") {
@@ -184,6 +192,8 @@ describe("ProvidersSection", () => {
         origin: "detected",
         configuration_state: "invalid",
         error: "Provider configuration is invalid. Reconfigure this provider.",
+        connection_state: "misconfigured",
+        connection_detail: "This provider's configuration could not be parsed on this host.",
         capabilities: {
           model_discovery: "unknown",
           usage_status: "unknown",
@@ -196,13 +206,20 @@ describe("ProvidersSection", () => {
 
     const codex = screen.getByTestId("provider-row-codex");
     expect(within(codex).getByText("Codex")).toBeInTheDocument();
-    expect(within(codex).getByText("Configuration valid")).toBeInTheDocument();
+    expect(within(codex).getByText("Connected")).toBeInTheDocument();
+    expect(
+      within(codex).getByText("The codex CLI is installed and reports a usable credential."),
+    ).toBeInTheDocument();
     expect(within(codex).getByText(/Families: openai \(gpt-5\.4\)/)).toBeInTheDocument();
     expect(within(codex).getByText("CLI: codex")).toBeInTheDocument();
     expect(within(codex).queryByText("Detected")).toBeNull();
 
     const broken = screen.getByTestId("provider-row-broken");
-    expect(within(broken).getByText("Configuration invalid")).toBeInTheDocument();
+    expect(within(broken).getByText("Misconfigured")).toBeInTheDocument();
+    expect(screen.getByTestId("provider-state-broken")).toHaveAttribute(
+      "data-state",
+      "misconfigured",
+    );
     expect(
       within(broken).getByText("Provider configuration is invalid. Reconfigure this provider."),
     ).toBeInTheDocument();
@@ -277,6 +294,59 @@ describe("ProvidersSection", () => {
     mocks.hosts = [];
     renderPage();
     expect(screen.getByText(/No host is connected yet/)).toBeInTheDocument();
+  });
+
+  it("renders an actionable state instead of a bare validity flag", () => {
+    mocks.providers = [
+      provider({
+        id: "claude",
+        display_name: "Claude",
+        cli: "claude",
+        connection_state: "authentication_required",
+        connection_detail: "The claude CLI is installed but has no credential yet.",
+      }),
+    ];
+    renderPage();
+
+    const row = screen.getByTestId("provider-row-claude");
+    expect(within(row).getByText("Authentication required")).toBeInTheDocument();
+    expect(
+      within(row).getByText("The claude CLI is installed but has no credential yet."),
+    ).toBeInTheDocument();
+  });
+
+  it("says unknown, not connected, for a host that reports no state", () => {
+    // A host predating connection states omits the field entirely.
+    const row = provider({ id: "legacy", display_name: "Legacy" });
+    delete row.connection_state;
+    delete row.connection_detail;
+    mocks.providers = [row];
+    renderPage();
+
+    expect(screen.getByTestId("provider-state-legacy")).toHaveAttribute("data-state", "unknown");
+    expect(within(screen.getByTestId("provider-row-legacy")).getByText("Unknown")).toBeVisible();
+  });
+
+  it("names a host timeout rather than reporting a generic failure", () => {
+    mocks.inventoryError = true;
+    mocks.inventoryErrorObj = httpError(504, "504 Gateway Timeout");
+    renderPage();
+
+    const block = screen.getByTestId("provider-error");
+    expect(block).toHaveAttribute("data-state", "timeout");
+    expect(block).toHaveTextContent("Timed out");
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(mocks.refetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("names an offline host as unavailable", () => {
+    mocks.inventoryError = true;
+    mocks.inventoryErrorObj = httpError(409, "409 Conflict");
+    renderPage();
+
+    const block = screen.getByTestId("provider-error");
+    expect(block).toHaveAttribute("data-state", "unavailable");
+    expect(block).toHaveTextContent("Host unavailable");
   });
 
   it("shows loading states for hosts and inventory", () => {

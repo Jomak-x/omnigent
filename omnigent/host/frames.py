@@ -782,7 +782,8 @@ class HostDetectCredentialsResultFrame:
     :param credentials: List of ``{"family": ..., "source": ..., "env_var": ...}``
         dicts (non-secret). Empty when nothing adoptable was found.
     :param providers: Sanitized provider inventory from the host's effective
-        Omnigent configuration. Empty for older hosts.
+        Omnigent configuration, each row carrying an explicit
+        ``connection_state``. Empty for older hosts.
     """
 
     request_id: str
@@ -1964,6 +1965,21 @@ def _decode_detect_credentials_result(msg: _JsonObject) -> HostDetectCredentials
 
 _PROVIDER_CAPABILITY_VALUES = frozenset({"supported", "unsupported", "unknown"})
 
+# Connection states a host may report per provider. A host running an older or
+# newer build may omit one or send a state this build does not know; either way
+# the row is kept and degraded to ``unknown`` rather than dropped, so the UI
+# still lists the provider instead of silently losing it.
+_PROVIDER_CONNECTION_STATES = frozenset(
+    {
+        "connected",
+        "authentication_required",
+        "misconfigured",
+        "unavailable",
+        "unknown",
+    }
+)
+_UNKNOWN_CONNECTION_DETAIL = "This host does not report provider connection state."
+
 
 def _decode_provider_inventory(raw: object) -> list[_JsonObject]:
     """Allowlist non-secret fields from host-reported provider rows."""
@@ -2032,6 +2048,13 @@ def _decode_provider_inventory(raw: object) -> list[_JsonObject]:
             optional_strings[key] = value
         if not valid:
             continue
+        raw_state = item.get("connection_state")
+        state = raw_state if raw_state in _PROVIDER_CONNECTION_STATES else "unknown"
+        raw_detail = item.get("connection_detail")
+        if isinstance(raw_detail, str) and raw_detail:
+            detail = raw_detail
+        else:
+            detail = _UNKNOWN_CONNECTION_DETAIL if state == "unknown" else ""
         providers.append(
             {
                 **{key: item[key] for key in required},
@@ -2039,6 +2062,8 @@ def _decode_provider_inventory(raw: object) -> list[_JsonObject]:
                 "default_models": default_models,
                 **optional_strings,
                 "capabilities": capabilities,
+                "connection_state": state,
+                "connection_detail": detail,
             }
         )
     return providers

@@ -2473,7 +2473,12 @@ class HostProcess:
             _logger.exception("Failed to detect adoptable credentials")
             detected = []
         try:
-            providers = [entry.as_dict() for entry in build_provider_inventory()]
+            # Reuse the readiness map this daemon already refreshes so CLI-backed
+            # rows get an explicit connection state without a probe of their own.
+            providers = [
+                entry.as_dict()
+                for entry in build_provider_inventory(harness_readiness=self._configured_harnesses)
+            ]
         except Exception:  # malformed config must not hang the UI
             _logger.exception("Failed to build provider inventory")
             providers = []

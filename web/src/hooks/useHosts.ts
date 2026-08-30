@@ -291,6 +291,16 @@ export interface DetectedCredential {
 
 export type ProviderCapabilitySupport = "supported" | "unsupported" | "unknown";
 
+/**
+ * How usable a provider is, as reported by the host. Settled states only: a
+ * row that exists has been checked. The transient states a *fetch* can be in
+ * (`connecting` / `timeout` / `error` / `unavailable`) are produced by
+ * {@link providerFetchState} instead, so a status surface always has one
+ * explicit state to render and never an open-ended spinner.
+ */
+export type ProviderConnectionState =
+  "connected" | "authentication_required" | "misconfigured" | "unavailable" | "unknown";
+
 export interface ProviderCapabilities {
   model_discovery: ProviderCapabilitySupport;
   usage_status: ProviderCapabilitySupport;
@@ -315,6 +325,21 @@ export interface ProviderInventoryEntry {
   profile: string | null;
   model_provider: string | null;
   capabilities: ProviderCapabilities;
+  /** Absent from hosts predating connection states — treat as "unknown". */
+  connection_state?: ProviderConnectionState;
+  /** The host's own non-secret sentence explaining the state. */
+  connection_detail?: string;
+}
+
+/** An HTTP failure that kept its status, so callers can classify it. */
+export class ProviderInventoryError extends Error {
+  readonly status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "ProviderInventoryError";
+    this.status = status;
+  }
 }
 
 /** Fetch provider configuration on demand; no background CLI polling. */
@@ -325,7 +350,7 @@ export function useProviderInventory(hostId: string | null | undefined, enabled:
       const res = await authenticatedFetch(
         `/v1/hosts/${encodeURIComponent(hostId ?? "")}/providers`,
       );
-      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+      if (!res.ok) throw new ProviderInventoryError(res.status, `${res.status} ${res.statusText}`);
       const body = (await res.json()) as { providers?: ProviderInventoryEntry[] };
       return Array.isArray(body.providers) ? body.providers : [];
     },

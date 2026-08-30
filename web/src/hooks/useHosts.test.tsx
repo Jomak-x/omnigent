@@ -9,6 +9,7 @@ import {
   useHosts,
   useInstallHarness,
   useInstallingHarnesses,
+  ProviderInventoryError,
   useProviderInventory,
   useStoreCredential,
 } from "./useHosts";
@@ -547,5 +548,16 @@ describe("useProviderInventory", () => {
     expect(fetchMock).not.toHaveBeenCalled();
     disabled.unmount();
     noHost.unmount();
+  });
+
+  it("keeps the HTTP status on failure so the UI can name the state", async () => {
+    // A 504 must be renderable as "timed out", not a generic error.
+    fetchMock.mockResolvedValueOnce(mockResponse({}, 504));
+
+    const { result } = renderHook(() => useProviderInventory("host_1", true), { wrapper });
+    await waitFor(() => expect(result.current.isError).toBe(true));
+
+    expect(result.current.error).toBeInstanceOf(ProviderInventoryError);
+    expect((result.current.error as ProviderInventoryError).status).toBe(504);
   });
 });

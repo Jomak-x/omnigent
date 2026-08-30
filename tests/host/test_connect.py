@@ -2944,7 +2944,7 @@ def test_handle_detect_credentials_returns_non_secret_descriptors(
     monkeypatch.setattr(
         connect,
         "build_provider_inventory",
-        lambda: [SimpleNamespace(as_dict=lambda: provider)],
+        lambda **_kwargs: [SimpleNamespace(as_dict=lambda: provider)],
     )
     host = _make_host_process()
     result = host._handle_detect_credentials(HostDetectCredentialsFrame(request_id="d1"))
@@ -2953,6 +2953,28 @@ def test_handle_detect_credentials_returns_non_secret_descriptors(
         {"family": "anthropic", "source": "$ANTHROPIC_API_KEY", "env_var": "ANTHROPIC_API_KEY"}
     ]
     assert result.providers == [provider]
+
+
+def test_detect_credentials_reuses_the_cached_harness_readiness_map(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Provider connection state must not cost a fresh readiness probe."""
+    import omnigent.host.connect as connect
+
+    monkeypatch.setattr(connect, "detect_adoptable_credentials", list)
+    seen: dict[str, object] = {}
+
+    def _inventory(**kwargs: object) -> list[object]:
+        seen.update(kwargs)
+        return []
+
+    monkeypatch.setattr(connect, "build_provider_inventory", _inventory)
+    host = _make_host_process()
+    host._configured_harnesses = {"codex-native": "needs-auth"}
+
+    host._handle_detect_credentials(HostDetectCredentialsFrame(request_id="d2"))
+
+    assert seen == {"harness_readiness": {"codex-native": "needs-auth"}}
 
 
 # --- Fail-loud on permanent tunnel failures ----------------------------

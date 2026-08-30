@@ -1498,6 +1498,8 @@ def test_detect_credentials_round_trip() -> None:
                     "multiple_profiles": "unsupported",
                     "interactive_cli": "supported",
                 },
+                "connection_state": "authentication_required",
+                "connection_detail": "The claude CLI is installed but has no credential yet.",
             }
         ],
     )
@@ -1571,6 +1573,78 @@ def test_detect_credentials_result_drops_unknown_provider_fields() -> None:
     assert len(decoded.providers) == 1
     assert "api_key" not in decoded.providers[0]
     assert "base_url" not in decoded.providers[0]
+
+
+def _provider_row(**overrides: object) -> dict[str, object]:
+    row: dict[str, object] = {
+        "id": "work",
+        "display_name": "Work",
+        "kind": "gateway",
+        "origin": "configured",
+        "source": "config",
+        "configuration_state": "valid",
+        "error": None,
+        "families": ["openai"],
+        "surfaces": ["openai"],
+        "default_for": ["openai"],
+        "default_models": {},
+        "cli": None,
+        "profile": None,
+        "model_provider": None,
+        "capabilities": {
+            "model_discovery": "supported",
+            "usage_status": "unsupported",
+            "multiple_profiles": "unknown",
+            "interactive_cli": "unsupported",
+        },
+    }
+    row.update(overrides)
+    return row
+
+
+def _decode_providers(*rows: dict[str, object]) -> list[dict[str, object]]:
+    decoded = decode_host_frame(
+        json.dumps(
+            {
+                "kind": "host.detect_credentials_result",
+                "request_id": "r3",
+                "credentials": [],
+                "providers": list(rows),
+            }
+        )
+    )
+    assert isinstance(decoded, HostDetectCredentialsResultFrame)
+    return decoded.providers
+
+
+def test_provider_row_from_a_host_without_connection_state_reads_unknown() -> None:
+    """An older host omits the field; the row stays, explicitly unknown."""
+    [row] = _decode_providers(_provider_row())
+
+    assert row["connection_state"] == "unknown"
+    assert row["connection_detail"] == "This host does not report provider connection state."
+
+
+def test_unrecognized_connection_state_degrades_instead_of_dropping_the_row() -> None:
+    [row] = _decode_providers(
+        _provider_row(connection_state="quantum", connection_detail="from the future")
+    )
+
+    assert row["connection_state"] == "unknown"
+    # The host's own sentence is still worth showing alongside the safe state.
+    assert row["connection_detail"] == "from the future"
+
+
+def test_known_connection_state_survives_the_tunnel() -> None:
+    [row] = _decode_providers(
+        _provider_row(
+            connection_state="authentication_required",
+            connection_detail="Sign in on this host to use it.",
+        )
+    )
+
+    assert row["connection_state"] == "authentication_required"
+    assert row["connection_detail"] == "Sign in on this host to use it."
 
 
 def test_fs_request_round_trip() -> None:
