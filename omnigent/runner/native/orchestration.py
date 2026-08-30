@@ -6111,6 +6111,7 @@ class _ClaudeSessionLaunchMetadata:
 
     reasoning_effort: str | None = None
     model_override: str | None = None
+    provider_override: str | None = None
     terminal_launch_args: list[str] | None = None
     external_session_id: str | None = None
     fork_source_external_id: str | None = None
@@ -6156,6 +6157,7 @@ def _claude_launch_metadata_from_envelope(
         turn_routing=routing_class.turn_routing,
         reasoning_effort=snapshot.reasoning_effort,
         model_override=snapshot.model_override,
+        provider_override=snapshot.provider_override,
         terminal_launch_args=snapshot.terminal_launch_args,
         external_session_id=snapshot.external_session_id,
         fork_source_external_id=(
@@ -6193,6 +6195,16 @@ async def _load_legacy_claude_launch_metadata(
     snapshot = response.json()
     effort = snapshot.get("reasoning_effort")
     model_override = snapshot.get("model_override")
+    provider_override = snapshot.get("provider_override")
+    if provider_override is not None:
+        if not isinstance(provider_override, str):
+            raise RuntimeError(f"Invalid provider_override for Claude session {session_id!r}.")
+        try:
+            provider_override = validate_provider_override(provider_override)
+        except ValueError as exc:
+            raise RuntimeError(
+                f"Invalid provider_override for Claude session {session_id!r}: {exc}"
+            ) from exc
     launch_args = snapshot.get("terminal_launch_args")
     external_session_id = snapshot.get("external_session_id")
     labels = snapshot.get("labels")
@@ -6213,6 +6225,7 @@ async def _load_legacy_claude_launch_metadata(
         model_override=(
             model_override if isinstance(model_override, str) and model_override else None
         ),
+        provider_override=provider_override,
         terminal_launch_args=(
             launch_args
             if isinstance(launch_args, list) and all(isinstance(arg, str) for arg in launch_args)
@@ -6278,7 +6291,8 @@ async def _auto_create_claude_terminal(
     skills_filter: str | list[str] = "all",
     session_init: RunnerSessionInitEnvelope | None = None,
     auth_token_factory: Callable[[], str | None] | None = None,
-    resolve_launch_config: Callable[[], Awaitable[ClaudeNativeUcodeConfig | None]] | None = None,
+    resolve_launch_config: Callable[[str | None], Awaitable[ClaudeNativeUcodeConfig | None]]
+    | None = None,
     record_launch_config: Callable[[str, ClaudeNativeUcodeConfig | None], None] | None = None,
 ) -> SessionResourceView:
     """
@@ -6673,14 +6687,24 @@ async def _auto_create_claude_terminal(
     _launch_config_resolution_failed = False
     try:
         if resolve_launch_config is not None:
-            claude_config = await resolve_launch_config()
+            claude_config = await resolve_launch_config(launch_metadata.provider_override)
         else:
-            claude_config = await asyncio.to_thread(resolve_native_claude_config, spec=None)
+            claude_config = await asyncio.to_thread(
+                resolve_native_claude_config,
+                spec=None,
+                provider_name=launch_metadata.provider_override,
+            )
     except click.ClickException:
         # An authoritative Databricks response with no Claude models is a
         # configuration failure, not permission to bypass the gateway.
         raise
-    except Exception:  # noqa: BLE001 — best-effort; fall back to native auth
+    except Exception as exc:  # Best-effort for unpinned launches only.
+        if launch_metadata.provider_override is not None:
+            raise RuntimeError(
+                "native-claude: the pinned provider "
+                f"{launch_metadata.provider_override!r} could not be configured; "
+                "refusing to launch with a different Claude account."
+            ) from exc
         _logger.warning(
             "native-claude: could not derive a provider/ucode launch config "
             "— FALLING BACK to Claude Code's own login; "
@@ -7445,7 +7469,9 @@ class NativeLaunchContext:
     agent_name: str | None = None
     session_init: RunnerSessionInitEnvelope | None = None
     auth_token_factory: Callable[[], str | None] | None = None
-    resolve_launch_config: Callable[[], Awaitable[ClaudeNativeUcodeConfig | None]] | None = None
+    resolve_launch_config: (
+        Callable[[str | None], Awaitable[ClaudeNativeUcodeConfig | None]] | None
+    ) = None
     record_launch_config: Callable[[str, ClaudeNativeUcodeConfig | None], None] | None = None
 
 

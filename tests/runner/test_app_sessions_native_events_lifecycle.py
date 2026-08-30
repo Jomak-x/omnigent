@@ -1048,7 +1048,10 @@ async def test_claude_native_model_options_use_session_launch_catalog(
     )
     resolved_specs: list[AgentSpec | None] = []
 
-    def _resolve(*, spec: AgentSpec | None) -> ClaudeNativeUcodeConfig:
+    def _resolve(
+        *, spec: AgentSpec | None, provider_name: str | None = None
+    ) -> ClaudeNativeUcodeConfig:
+        assert provider_name is None
         resolved_specs.append(spec)
         return config
 
@@ -1088,7 +1091,7 @@ async def test_claude_native_model_options_use_session_launch_catalog(
         recorder = kwargs.get("record_launch_config")
         assert callable(resolver)
         assert callable(recorder)
-        recorder(session_id, await resolver())
+        recorder(session_id, await resolver(None))
         return SessionResourceView(
             id="terminal_claude_main",
             type="terminal",
@@ -1175,7 +1178,7 @@ async def test_claude_native_model_options_serves_probe_rows_after_pending(
     )
     monkeypatch.setattr(
         "omnigent.claude_native.resolve_native_claude_config",
-        lambda *, spec: config,
+        lambda *, spec, provider_name=None: config,
     )
     release = asyncio.Event()
 
@@ -1204,7 +1207,7 @@ async def test_claude_native_model_options_serves_probe_rows_after_pending(
         recorder = kwargs.get("record_launch_config")
         assert callable(resolver)
         assert callable(recorder)
-        recorder(session_id, await resolver())
+        recorder(session_id, await resolver(None))
         return SessionResourceView(
             id="terminal_claude_main",
             type="terminal",
@@ -1279,8 +1282,10 @@ async def test_claude_native_model_options_config_error_is_not_retryable(
         del agent_id, session_id
         return claude_spec
 
-    def _resolve(*, spec: AgentSpec | None) -> ClaudeNativeUcodeConfig:
-        del spec
+    def _resolve(
+        *, spec: AgentSpec | None, provider_name: str | None = None
+    ) -> ClaudeNativeUcodeConfig:
+        del spec, provider_name
         raise click.ClickException("Databricks profile 'p' exposes no Claude model services.")
 
     monkeypatch.setattr("omnigent.claude_native.resolve_native_claude_config", _resolve)

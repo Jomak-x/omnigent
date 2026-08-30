@@ -1384,6 +1384,7 @@ class SessionResourceRegistry:
         """
         from omnigent.claude_native_bridge import (
             bridge_dir_for_conversation_id,
+            read_claude_config_dir,
             read_claude_session_id,
         )
         from omnigent.claude_native_status_file import SessionStatusPoller
@@ -1405,6 +1406,7 @@ class SessionResourceRegistry:
             pane_pid_getter=instance.pane_pid_sync,
             session_id_getter=_session_id_getter,
             omnigent_session_id=session_id,
+            config_dir=read_claude_config_dir(bridge_dir),
         )
 
     async def _handle_terminal_exit(

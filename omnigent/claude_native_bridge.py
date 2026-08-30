@@ -1011,7 +1011,9 @@ def prepare_bridge_dir(
         vocabulary keys (``ANTHROPIC_DEFAULT_*_MODEL`` /
         ``ANTHROPIC_CUSTOM_MODEL_OPTION``) are persisted so runner-side
         callers — which don't share the terminal's env — can translate a
-        routed model id into a ``/model`` argument the CLI accepts.
+        routed model id into a ``/model`` argument the CLI accepts. A
+        ``CLAUDE_CONFIG_DIR`` profile home is also persisted so the status
+        watcher reads this terminal's own ``sessions`` directory.
     :param sandbox: Resolved ``os_env.sandbox`` for this session (the
         agent spec's declared sandbox, already overridden by any
         ``enforce_sandbox``/``force_sandbox`` policy verdict). Persisted
@@ -1046,6 +1048,8 @@ def prepare_bridge_dir(
     }
     if model_env:
         payload["model_env"] = model_env
+    if launch_env is not None and launch_env.get("CLAUDE_CONFIG_DIR"):
+        payload["claude_config_dir"] = launch_env["CLAUDE_CONFIG_DIR"]
     if sandbox is not None:
         payload["sandbox"] = _bridge_sandbox_payload(sandbox)
     _write_json_file(bridge_dir / _CONFIG_FILE, payload)
@@ -1241,6 +1245,15 @@ def read_model_env(bridge_dir: Path) -> dict[str, str]:
     }
 
 
+def read_claude_config_dir(bridge_dir: Path) -> Path | None:
+    """Read the Claude profile home recorded for this terminal launch."""
+    config = _read_json_file(bridge_dir / _CONFIG_FILE)
+    if not isinstance(config, dict):
+        return None
+    value = config.get("claude_config_dir")
+    return Path(value) if isinstance(value, str) and value else None
+
+
 def record_model_vocabulary(
     bridge_dir: Path,
     *,
@@ -1273,6 +1286,10 @@ def record_model_vocabulary(
         if launch_env is not None and launch_env.get(key)
     }
     changed = False
+    config_dir = launch_env.get("CLAUDE_CONFIG_DIR") if launch_env is not None else None
+    if config_dir and config.get("claude_config_dir") != config_dir:
+        config["claude_config_dir"] = config_dir
+        changed = True
     if model_env and config.get("model_env") != model_env:
         config["model_env"] = model_env
         changed = True

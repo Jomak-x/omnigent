@@ -441,10 +441,10 @@ def provider_capabilities(provider: ProviderEntry) -> ProviderCapabilities:
         multiple_profiles = CapabilitySupport.SUPPORTED
     elif provider.kind in (SUBSCRIPTION_KIND, CLI_CONFIG_KIND):
         # A CLI-backed provider can hold a second account only where the launch
-        # honours a per-provider ``cli_home``; codex does, the others do not yet.
+        # honours a per-provider ``cli_home``.
         multiple_profiles = (
             CapabilitySupport.SUPPORTED
-            if provider.cli == "codex"
+            if provider.cli in {"claude", "codex"}
             else CapabilitySupport.UNSUPPORTED
         )
     else:

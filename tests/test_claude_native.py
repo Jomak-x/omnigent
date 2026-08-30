@@ -7881,6 +7881,85 @@ def test_resolve_native_claude_config_subscription_uses_cli_login(
     assert cfg is None
 
 
+def test_resolve_native_claude_config_subscription_uses_its_cli_home(
+    _isolated_provider_config: Path,
+    tmp_path: Path,
+) -> None:
+    """A Claude subscription profile launches from its own credential root."""
+    profile_home = tmp_path / "claude-work"
+    _seed_config(
+        _isolated_provider_config,
+        {
+            "claude-work": {
+                "kind": "subscription",
+                "cli": "claude",
+                "cli_home": str(profile_home),
+                "default": True,
+            }
+        },
+    )
+
+    cfg = claude_native.resolve_native_claude_config(spec=_no_auth_claude_spec())
+
+    assert cfg is not None
+    assert cfg.env == {"CLAUDE_CONFIG_DIR": str(profile_home)}
+
+
+def test_resolve_native_claude_config_provider_pin_outranks_default(
+    _isolated_provider_config: Path,
+    tmp_path: Path,
+) -> None:
+    """The session's provider pin selects that exact Claude account home."""
+    default_home = tmp_path / "default"
+    pinned_home = tmp_path / "pinned"
+    _seed_config(
+        _isolated_provider_config,
+        {
+            "default": {
+                "kind": "subscription",
+                "cli": "claude",
+                "cli_home": str(default_home),
+                "default": True,
+            },
+            "pinned": {
+                "kind": "subscription",
+                "cli": "claude",
+                "cli_home": str(pinned_home),
+            },
+        },
+    )
+
+    cfg = claude_native.resolve_native_claude_config(
+        spec=_no_auth_claude_spec(),
+        provider_name="pinned",
+    )
+
+    assert cfg is not None
+    assert cfg.env["CLAUDE_CONFIG_DIR"] == str(pinned_home)
+
+
+def test_resolve_native_claude_config_pinned_home_with_unset_env_fails_loud(
+    _isolated_provider_config: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A broken pinned home never degrades into the ambient Claude account."""
+    monkeypatch.delenv("MISSING_CLAUDE_HOME", raising=False)
+    _seed_config(
+        _isolated_provider_config,
+        {
+            "pinned": {
+                "kind": "subscription",
+                "cli": "claude",
+                "cli_home": "$MISSING_CLAUDE_HOME",
+                "default": True,
+            }
+        },
+    )
+
+    with pytest.raises(Exception, match="MISSING_CLAUDE_HOME"):
+        claude_native.resolve_native_claude_config(spec=None, provider_name="pinned")
+
+
 def test_resolve_native_claude_config_global_databricks_auth_uses_ucode(
     _isolated_provider_config: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

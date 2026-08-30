@@ -1,6 +1,6 @@
 # Multiple accounts per provider
 
-Two accounts with the same vendor — a personal Codex login and a work one — are
+Two accounts with the same vendor — personal and work Codex or Claude logins — are
 one config change apart, because a provider entry can now name the CLI home it
 authenticates from.
 
@@ -14,6 +14,10 @@ providers:
     kind: subscription
     cli: codex
     cli_home: ~/.codex-work    # this account's own credential root
+  claude-work:
+    kind: subscription
+    cli: claude
+    cli_home: ~/.claude-work
 ```
 
 `cli_home` accepts `~` and `$VAR` references, resolved when a launch uses them
@@ -46,22 +50,18 @@ credential reaches the frontend.
 | Background session titles | **Wired** |
 | Codex readiness (`needs-auth` vs signed in) | **Wired** — judged against the default provider's own home |
 | Codex usage/quota reads | **Wired** — probed with that home, and cached per home so two accounts never serve each other's numbers |
-| `claude-native` | **Not yet** — needs the same treatment for `CLAUDE_CONFIG_DIR`; `multiple_profiles` honestly reports `unsupported` for claude rather than promising a switch that would not happen |
+| `claude-native` sessions (web / runner) | **Wired** — the session provider pin resolves its subscription's `cli_home` to `CLAUDE_CONFIG_DIR`; the bridge records that home so the status watcher reads the same account's session files |
+| `omnigent claude` (local TUI) | **Wired** — a default Claude subscription's `cli_home` becomes `CLAUDE_CONFIG_DIR` |
 | In-process `codex` SDK harness | **Not yet** — resolves its own home in `codex_executor.py` |
 
 The capability flag follows the wiring: `ProviderCapabilities.multiple_profiles`
-is `supported` only for `cli: codex` entries.
+is `supported` for `cli: codex` and `cli: claude` entries.
 
 ## What is deliberately not built yet
 
-**Choosing a profile per session.** Today a session uses whichever provider is
-the configured default for its harness. Picking one per session needs a
-provider pin threaded from `SessionCreateRequest` → the existing
-`session_overrides` JSON column (no migration required) → `session_init_protocol`
-→ `resolve_native_codex_launch`, slotting in above "explicit per-family default
-provider" in that function's documented precedence. That same seam is what
-failover (T11) needs in order to move work between profiles, so it should be
-built once, for both, rather than twice.
+**In-process SDK account switching.** Native Codex and Claude sessions honor the
+persisted per-session provider pin. The in-process SDK harnesses still resolve
+credentials through their own builders and do not consume a CLI login home.
 
 ## Failover between accounts
 

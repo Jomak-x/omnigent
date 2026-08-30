@@ -486,3 +486,41 @@ async def test_legacy_metadata_loader_reads_the_auto_harness_flag(
         metadata = await _load_legacy_claude_launch_metadata(client, "conv_abc")
 
     assert metadata.auto_harness is expected
+
+
+def test_envelope_metadata_carries_provider_override() -> None:
+    """Current servers pass the exact selected Claude provider to launch."""
+    from omnigent.runner.session_init_protocol import (
+        SESSION_INIT_PROTOCOL_VERSION,
+        RunnerSessionInitEnvelope,
+    )
+
+    envelope = RunnerSessionInitEnvelope(
+        protocol_version=SESSION_INIT_PROTOCOL_VERSION,
+        server_version="test",
+        session_id="conv_provider",
+        agent_id="agent",
+        snapshot={
+            "created_at": 0,
+            "updated_at": 0,
+            "provider_override": "claude-work",
+        },
+    )
+
+    assert _claude_launch_metadata_from_envelope(envelope).provider_override == "claude-work"
+
+
+@pytest.mark.asyncio
+async def test_legacy_metadata_loader_carries_provider_override() -> None:
+    """Older servers' snapshot response preserves the same provider pin."""
+    import httpx
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(200, json={"provider_override": "claude-work"})
+        ),
+        base_url="http://runner",
+    ) as client:
+        metadata = await _load_legacy_claude_launch_metadata(client, "conv_provider")
+
+    assert metadata.provider_override == "claude-work"

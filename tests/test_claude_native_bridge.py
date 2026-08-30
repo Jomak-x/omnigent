@@ -5948,6 +5948,7 @@ def test_record_model_vocabulary_backfills_a_runner_prepared_bridge(
     back exactly as the CLI path's prepare-time record does.
     """
     from omnigent.claude_native_bridge import (
+        read_claude_config_dir,
         read_launch_model,
         read_model_env,
         record_model_vocabulary,
@@ -5964,6 +5965,7 @@ def test_record_model_vocabulary_backfills_a_runner_prepared_bridge(
         launch_env={
             "ANTHROPIC_DEFAULT_OPUS_MODEL": "databricks-claude-opus-4-8",
             "ANTHROPIC_BASE_URL": "https://example.invalid",
+            "CLAUDE_CONFIG_DIR": str(tmp_path / "claude-work"),
         },
         launch_model="databricks-claude-opus-4-8",
     )
@@ -5971,12 +5973,32 @@ def test_record_model_vocabulary_backfills_a_runner_prepared_bridge(
         "ANTHROPIC_DEFAULT_OPUS_MODEL": "databricks-claude-opus-4-8",
     }
     assert read_launch_model(bridge_dir) == "databricks-claude-opus-4-8"
+    assert read_claude_config_dir(bridge_dir) == tmp_path / "claude-work"
 
     # A bare subscription launch records nothing and disturbs nothing.
     record_model_vocabulary(bridge_dir, launch_env=None, launch_model=None)
     assert read_model_env(bridge_dir) == {
         "ANTHROPIC_DEFAULT_OPUS_MODEL": "databricks-claude-opus-4-8",
     }
+
+
+def test_prepare_bridge_records_claude_profile_home(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CLI-launched terminals leave the watcher their exact profile root."""
+    from omnigent.claude_native_bridge import read_claude_config_dir
+
+    monkeypatch.setattr("omnigent.claude_native_bridge._BRIDGE_ROOT", tmp_path / "root")
+    profile_home = tmp_path / "claude-personal"
+
+    bridge_dir = prepare_bridge_dir(
+        "conv_profile",
+        workspace=tmp_path,
+        launch_env={"CLAUDE_CONFIG_DIR": str(profile_home)},
+    )
+
+    assert read_claude_config_dir(bridge_dir) == profile_home
 
 
 def test_model_env_is_empty_without_a_ucode_launch(

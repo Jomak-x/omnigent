@@ -986,6 +986,7 @@ class _SessionSnapshot:
     sub_agent_name: str | None = None
     parent_session_id: str | None = None
     agent_name: str | None = None
+    provider_override: str | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -2385,6 +2386,7 @@ def create_runner_app(
 
     async def _resolve_session_claude_launch_config(
         session_id: str,
+        provider_override: str | None = None,
     ) -> ClaudeNativeUcodeConfig | None:
         if session_id in _session_claude_launch_configs:
             return _session_claude_launch_configs[session_id]
@@ -2393,8 +2395,15 @@ def create_runner_app(
             from omnigent.claude_native import resolve_native_claude_config
 
             async def _load() -> ClaudeNativeUcodeConfig | None:
+                effective_provider = provider_override
+                if effective_provider is None:
+                    effective_provider = (await _session_snapshot(session_id)).provider_override
                 spec = await _resolve_session_agent_spec(session_id)
-                config = await asyncio.to_thread(resolve_native_claude_config, spec=spec)
+                config = await asyncio.to_thread(
+                    resolve_native_claude_config,
+                    spec=spec,
+                    provider_name=effective_provider,
+                )
                 _session_claude_launch_configs[session_id] = config
                 return config
 
@@ -2880,6 +2889,7 @@ def create_runner_app(
             sub_agent_name: str | None = None
             parent_session_id: str | None = None
             agent_name: str | None = None
+            provider_override: str | None = None
             try:
                 resp = await server_client.get(f"/v1/sessions/{session_id}")
                 status_code = resp.status_code
@@ -2901,6 +2911,9 @@ def create_runner_app(
                     raw_agent_name = body.get("agent_name")
                     if isinstance(raw_agent_name, str) and raw_agent_name:
                         agent_name = raw_agent_name
+                    raw_provider_override = body.get("provider_override")
+                    if isinstance(raw_provider_override, str) and raw_provider_override:
+                        provider_override = raw_provider_override
             except Exception:  # noqa: BLE001 — best-effort; created_at falls back to wall time
                 pass
             snapshot = _SessionSnapshot(
@@ -2912,6 +2925,7 @@ def create_runner_app(
                 sub_agent_name=sub_agent_name,
                 parent_session_id=parent_session_id,
                 agent_name=agent_name,
+                provider_override=provider_override,
             )
             if snapshot.ok and snapshot.agent_id is not None:
                 if _session_cache_generation_is_current(session_id, generation):
@@ -2960,6 +2974,7 @@ def create_runner_app(
             agent_id=agent_id,
             sub_agent_name=envelope.sub_agent_name,
             parent_session_id=snapshot.parent_session_id,
+            provider_override=snapshot.provider_override,
         )
         _session_start_cache[session_id] = float(snapshot.created_at)
         _session_workspace_cache[session_id] = snapshot.workspace
@@ -3478,8 +3493,8 @@ def create_runner_app(
                         skills_filter=skills_filter,
                         session_init=init_context.envelope,
                         auth_token_factory=auth_token_factory,
-                        resolve_launch_config=lambda: _resolve_session_claude_launch_config(
-                            session_id
+                        resolve_launch_config=lambda provider: (
+                            _resolve_session_claude_launch_config(session_id, provider)
                         ),
                         record_launch_config=_session_claude_launch_configs.__setitem__,
                     )
@@ -8442,8 +8457,8 @@ def create_runner_app(
                         agent_name=getattr(claude_agent_spec, "name", None),
                         skills_filter=getattr(claude_agent_spec, "skills_filter", "all"),
                         auth_token_factory=auth_token_factory,
-                        resolve_launch_config=lambda: _resolve_session_claude_launch_config(
-                            session_id
+                        resolve_launch_config=lambda provider: (
+                            _resolve_session_claude_launch_config(session_id, provider)
                         ),
                         record_launch_config=_session_claude_launch_configs.__setitem__,
                     )

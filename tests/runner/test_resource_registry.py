@@ -90,6 +90,33 @@ def _agent_spec_with_sandbox_none(cwd: Path) -> SimpleNamespace:
     )
 
 
+def test_claude_status_poller_uses_recorded_profile_home(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The runner watches the same Claude profile directory it launched."""
+    from omnigent.claude_native_bridge import prepare_bridge_dir
+
+    monkeypatch.setattr("omnigent.claude_native_bridge._TRUSTED_PARENT", tmp_path)
+    monkeypatch.setattr("omnigent.claude_native_bridge._BRIDGE_ROOT", tmp_path / "bridges")
+    profile_home = tmp_path / "claude-work"
+    prepare_bridge_dir(
+        "conv_profile",
+        workspace=tmp_path,
+        launch_env={"CLAUDE_CONFIG_DIR": str(profile_home)},
+    )
+    registry = SessionResourceRegistry(terminal_registry=TerminalRegistry())
+    instance = make_test_terminal_instance("claude", "main", tmp_path)
+
+    poller = registry._build_claude_native_status_poller(
+        session_id="conv_profile",
+        instance=instance,
+        on_status=lambda _status, _blocked_on: None,
+    )
+
+    assert poller._config_dir == profile_home
+
+
 def _seed_terminal(
     registry: TerminalRegistry,
     conversation_id: str,

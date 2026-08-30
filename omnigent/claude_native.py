@@ -2899,8 +2899,8 @@ def _native_claude_config_from_entry(
     - ``bedrock`` → Bedrock-style gateway config
       (:func:`_bedrock_config_for_native_claude`).
     - ``databricks`` → the existing ucode path keyed on the provider profile.
-    - ``subscription`` → ``None`` (use the ``claude`` CLI's own login, e.g. a
-      Claude Enterprise seat) — intentional, not a fallback to ucode.
+    - ``subscription`` → the ``claude`` CLI's own login, isolated through
+      ``CLAUDE_CONFIG_DIR`` when the provider declares ``cli_home``.
 
     :param entry: The resolved provider entry.
     :param refresh_models: Forwarded to the ucode path's model discovery; pass
@@ -2913,6 +2913,8 @@ def _native_claude_config_from_entry(
         GATEWAY_KIND,
         KEY_KIND,
         LOCAL_KIND,
+        SUBSCRIPTION_KIND,
+        provider_cli_home,
     )
 
     if entry.kind in (KEY_KIND, GATEWAY_KIND, LOCAL_KIND):
@@ -2922,15 +2924,66 @@ def _native_claude_config_from_entry(
     if entry.kind == DATABRICKS_KIND:
         log_info_once(_logger, "native-claude routing: Databricks ucode profile %r", entry.profile)
         return _ucode_config_for_profile(entry.profile, refresh_models=refresh_models)
+    if entry.kind == SUBSCRIPTION_KIND and entry.cli == "claude":
+        cli_home = provider_cli_home(entry)
+        log_info_once(
+            _logger,
+            "native-claude routing: Claude CLI login (subscription provider %r%s)",
+            entry.name,
+            f", home={cli_home}" if cli_home is not None else "",
+        )
+        if cli_home is not None:
+            return ClaudeNativeUcodeConfig(env={"CLAUDE_CONFIG_DIR": str(cli_home)})
+        return None
     log_info_once(
-        _logger, "native-claude routing: Claude CLI login (subscription provider %r)", entry.name
+        _logger, "native-claude routing: provider %r cannot configure native Claude", entry.name
     )
     return None
+
+
+def _pinned_native_claude_config(
+    explicit: dict[str, object],
+    provider_name: str,
+    *,
+    refresh_models: bool,
+) -> tuple[bool, ClaudeNativeUcodeConfig | None]:
+    """Resolve one per-session provider pin as ``(resolved, config)``."""
+    from omnigent.onboarding.detected import effective_config_with_detected
+    from omnigent.onboarding.provider_config import load_providers
+
+    try:
+        entry = load_providers(effective_config_with_detected(explicit, None)).get(provider_name)
+    except Exception:  # noqa: BLE001 - malformed host config must not strand a session
+        _logger.warning(
+            "native-claude routing: provider pin %r could not be resolved; "
+            "falling back to the configured default.",
+            provider_name,
+            exc_info=True,
+        )
+        return False, None
+    if entry is None:
+        _logger.warning(
+            "native-claude routing: provider pin %r is not configured on this host; "
+            "falling back to the configured default.",
+            provider_name,
+        )
+        return False, None
+    config = _native_claude_config_from_entry(entry, refresh_models=refresh_models)
+    if config is None and not (entry.kind == "subscription" and entry.cli == "claude"):
+        _logger.warning(
+            "native-claude routing: provider pin %r cannot route a Claude launch; "
+            "falling back to the configured default.",
+            provider_name,
+        )
+        return False, None
+    log_info_once(_logger, "native-claude routing: pinned provider %r", provider_name)
+    return True, config
 
 
 def resolve_native_claude_config(
     *,
     spec: AgentSpec | None,
+    provider_name: str | None = None,
     refresh_models: bool = True,
 ) -> ClaudeNativeUcodeConfig | None:
     """Resolve the native Claude Code launch config across all offerings.
@@ -2941,6 +2994,7 @@ def resolve_native_claude_config(
     claude-sdk harness. Precedence mirrors
     :func:`omnigent.runtime.workflow._resolve_provider_for_build`:
 
+    0. an explicit per-session provider pin, when supplied;
     1. when a *spec* is given, its resolved provider (spec ``executor.auth``
        → explicit per-family default → global ``auth:`` → ``databricks-*``
        model → ambient detection), falling back to the spec's own
@@ -2955,6 +3009,9 @@ def resolve_native_claude_config(
 
     :param spec: The agent spec, or ``None`` for the bare ``omnigent
         claude`` launch.
+    :param provider_name: Optional per-session provider pin. It outranks the
+        spec and host defaults; an unknown host-local name falls through with
+        an explicit warning rather than stranding the session.
     :param refresh_models: Query Databricks for the workspace's current Claude
         model services while resolving the ucode config. Capability checks that
         only need the routing shape pass ``False`` to stay network-free.
@@ -2968,6 +3025,16 @@ def resolve_native_claude_config(
     from omnigent.runtime.workflow import _load_global_auth, _resolve_provider_for_build
     from omnigent.spec.types import DatabricksAuth
 
+    explicit = load_config()
+    if provider_name is not None:
+        resolved, pinned = _pinned_native_claude_config(
+            explicit,
+            provider_name,
+            refresh_models=refresh_models,
+        )
+        if resolved:
+            return pinned
+
     # 1. Spec-driven: reuse the harness routing precedence verbatim. A
     #    non-None entry decides the config (including a deliberate None for a
     #    subscription); a None entry means the spec routed to databricks /
@@ -2979,7 +3046,6 @@ def resolve_native_claude_config(
         return _ucode_config_for_profile(spec.executor.profile, refresh_models=refresh_models)
 
     # 2. Spec-less (omnigent claude): explicit default wins first.
-    explicit = load_config()
     entry = default_provider_for_harness(explicit, "claude-sdk")
     if entry is not None:
         return _native_claude_config_from_entry(entry, refresh_models=refresh_models)

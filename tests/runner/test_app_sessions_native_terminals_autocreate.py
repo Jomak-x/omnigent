@@ -1203,7 +1203,9 @@ async def test_auto_create_claude_terminal_does_not_cache_transient_resolver_fai
     session_id = "conv_launch_config_retry"
     recorded_configs: dict[str, ClaudeNativeUcodeConfig | None] = {}
 
-    async def _failing_resolve_launch_config() -> ClaudeNativeUcodeConfig | None:
+    async def _failing_resolve_launch_config(
+        _provider: str | None,
+    ) -> ClaudeNativeUcodeConfig | None:
         raise RuntimeError("transient: secret temporarily unavailable")
 
     await _auto_create_claude_terminal(
@@ -1229,7 +1231,9 @@ async def test_auto_create_claude_terminal_does_not_cache_transient_resolver_fai
         model="databricks-claude-opus-4-7",
     )
 
-    async def _succeeding_resolve_launch_config() -> ClaudeNativeUcodeConfig | None:
+    async def _succeeding_resolve_launch_config(
+        _provider: str | None,
+    ) -> ClaudeNativeUcodeConfig | None:
         return real_config
 
     await _auto_create_claude_terminal(
@@ -3456,7 +3460,7 @@ async def test_auto_create_claude_terminal_launch_gate_folds_a_canonical_overrid
         )
     )
 
-    async def _resolve() -> ClaudeNativeUcodeConfig | None:
+    async def _resolve(_provider: str | None) -> ClaudeNativeUcodeConfig | None:
         return config
 
     session_id = "0f2d3d5c9a6b4e1f8c7d6e5f4a3b2c1d"
@@ -3583,7 +3587,7 @@ async def test_auto_create_claude_terminal_default_pin_requires_a_fresh_catalog(
         transport=httpx.MockTransport(_handle_request),
     )
 
-    async def _resolve() -> None:
+    async def _resolve(_provider: str | None) -> None:
         return None
 
     await _auto_create_claude_terminal(

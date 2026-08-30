@@ -65,7 +65,7 @@ def test_inventory_combines_configured_and_detected_providers_without_secrets() 
             "capabilities": {
                 "model_discovery": "supported",
                 "usage_status": "unsupported",
-                "multiple_profiles": "unsupported",
+                "multiple_profiles": "supported",
                 "interactive_cli": "supported",
             },
             "connection_state": "unavailable",
