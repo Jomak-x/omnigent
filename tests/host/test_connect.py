@@ -45,6 +45,7 @@ from omnigent.host.frames import (
     HostListDirResultFrame,
     HostModelOptionsFrame,
     HostModelOptionsResultFrame,
+    HostProviderUsageFrame,
     HostRunnerExitedFrame,
     HostRunnerStatusFrame,
     HostRunnerStatusResultFrame,
@@ -2975,6 +2976,73 @@ def test_detect_credentials_reuses_the_cached_harness_readiness_map(
     host._handle_detect_credentials(HostDetectCredentialsFrame(request_id="d2"))
 
     assert seen == {"harness_readiness": {"codex-native": "needs-auth"}}
+
+
+async def test_provider_usage_reads_codex_limits(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A codex-backed row is answered from the vendor's own reported limits."""
+    import omnigent.host.connect as connect
+    from omnigent.onboarding.provider_usage import ProviderUsageStatus, UsageState, UsageWindow
+
+    row = SimpleNamespace(provider_id="codex", cli="codex")
+    monkeypatch.setattr(connect, "build_provider_inventory", lambda **_kwargs: [row])
+    status = ProviderUsageStatus(
+        provider_id="codex",
+        state=UsageState.EXHAUSTED,
+        windows=(UsageWindow(window_id="primary", label="5-hour limit", used_percent=100.0),),
+        checked_at=1788112841.0,
+    )
+    seen: dict[str, object] = {}
+
+    async def _usage(provider_id: str, *, refresh: bool = False) -> ProviderUsageStatus:
+        seen.update({"provider_id": provider_id, "refresh": refresh})
+        return status
+
+    monkeypatch.setattr("omnigent.codex_usage.codex_usage_status", _usage)
+    host = _make_host_process()
+
+    result = await host._handle_provider_usage(
+        HostProviderUsageFrame(request_id="u1", provider_id="codex", refresh=True)
+    )
+
+    assert result.status == "ok"
+    assert result.usage == status.as_dict()
+    assert seen == {"provider_id": "codex", "refresh": True}
+
+
+async def test_provider_usage_for_a_vendor_without_limits_reports_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No probe runs for a provider whose vendor exposes nothing."""
+    import omnigent.host.connect as connect
+
+    row = SimpleNamespace(provider_id="work", cli=None)
+    monkeypatch.setattr(connect, "build_provider_inventory", lambda **_kwargs: [row])
+    host = _make_host_process()
+
+    result = await host._handle_provider_usage(
+        HostProviderUsageFrame(request_id="u2", provider_id="work")
+    )
+
+    assert result.status == "ok"
+    assert result.usage is not None
+    assert result.usage["state"] == "unknown"
+    assert result.usage["windows"] == []
+
+
+async def test_provider_usage_for_an_unknown_row_is_provider_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import omnigent.host.connect as connect
+
+    monkeypatch.setattr(connect, "build_provider_inventory", lambda **_kwargs: [])
+    host = _make_host_process()
+
+    result = await host._handle_provider_usage(
+        HostProviderUsageFrame(request_id="u3", provider_id="ghost")
+    )
+
+    assert result.usage is not None
+    assert result.usage["state"] == "provider_unavailable"
 
 
 # --- Fail-loud on permanent tunnel failures ----------------------------

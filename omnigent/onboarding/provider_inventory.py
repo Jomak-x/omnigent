@@ -413,9 +413,14 @@ def provider_capabilities(provider: ProviderEntry) -> ProviderCapabilities:
         multiple_profiles = CapabilitySupport.UNKNOWN
     return ProviderCapabilities(
         model_discovery=model_discovery,
-        # Session token/cost accounting exists, but proactive provider quota
-        # status is not implemented by any provider integration today.
-        usage_status=CapabilitySupport.UNSUPPORTED,
+        # Only Codex exposes its own quota locally (its app-server answers
+        # ``account/rateLimits/read``). Every other integration reports nothing
+        # a status surface could show without inventing it.
+        usage_status=(
+            CapabilitySupport.SUPPORTED
+            if provider.kind in (SUBSCRIPTION_KIND, CLI_CONFIG_KIND) and provider.cli == "codex"
+            else CapabilitySupport.UNSUPPORTED
+        ),
         multiple_profiles=multiple_profiles,
         interactive_cli=interactive_cli,
     )

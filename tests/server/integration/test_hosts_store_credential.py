@@ -29,6 +29,8 @@ from omnigent.host.frames import (
     HostDetectCredentialsFrame,
     HostDetectCredentialsResultFrame,
     HostHelloFrame,
+    HostProviderUsageFrame,
+    HostProviderUsageResultFrame,
     HostStoreSecretFrame,
     HostStoreSecretResultFrame,
     decode_host_frame,
@@ -73,6 +75,23 @@ _PROVIDER = {
     },
     "connection_state": "authentication_required",
     "connection_detail": "The claude CLI is installed but has no credential yet.",
+}
+_USAGE = {
+    "provider_id": "codex",
+    "profile": None,
+    "state": "nearly_exhausted",
+    "windows": [
+        {
+            "id": "primary",
+            "label": "5-hour limit",
+            "used_percent": 95.0,
+            "window_minutes": 300,
+            "resets_at": 1788122499,
+        }
+    ],
+    "plan": "plus",
+    "message": None,
+    "checked_at": 1788112841.0,
 }
 
 
@@ -186,6 +205,20 @@ async def cred_setup(
                                     }
                                 ],
                                 providers=[_PROVIDER],
+                            )
+                        ),
+                    }
+                )
+                continue
+            if isinstance(frame, HostProviderUsageFrame):
+                await comm.send_input(
+                    {
+                        "type": "websocket.receive",
+                        "text": encode_host_frame(
+                            HostProviderUsageResultFrame(
+                                request_id=frame.request_id,
+                                status="ok",
+                                usage=dict(_USAGE, provider_id=frame.provider_id),
                             )
                         ),
                     }
@@ -598,8 +631,10 @@ async def test_detect_credentials_hidden_when_flag_off(
     async with AsyncClient(transport=ASGITransport(app=off_app), base_url="http://test") as client:
         resp = await client.get(f"/v1/hosts/{_HOST_ID}/credentials/detected")
         providers_resp = await client.get(f"/v1/hosts/{_HOST_ID}/providers")
+        usage_resp = await client.get(f"/v1/hosts/{_HOST_ID}/providers/codex/usage")
     assert resp.status_code == 404
     assert providers_resp.status_code == 404
+    assert usage_resp.status_code == 404
 
 
 async def test_provider_inventory_returns_host_configuration(
@@ -614,3 +649,17 @@ async def test_provider_inventory_returns_host_configuration(
 
     assert resp.status_code == 200
     assert resp.json() == {"object": "provider_inventory", "providers": [_PROVIDER]}
+
+
+async def test_provider_usage_route_returns_the_hosts_reading(
+    cred_setup: tuple[
+        FastAPI, HostRegistry, list[HostStoreSecretFrame], dict[str, dict[str, Any]]
+    ],
+) -> None:
+    """The usage route forwards the host's vendor-reported quota verbatim."""
+    app, _reg, _received, _replies = cred_setup
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get(f"/v1/hosts/{_HOST_ID}/providers/codex/usage")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"object": "provider_usage", "usage": _USAGE}

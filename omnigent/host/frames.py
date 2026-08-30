@@ -70,6 +70,8 @@ class HostFrameKind(str, Enum):
     STORE_SECRET_RESULT = "host.store_secret_result"
     DETECT_CREDENTIALS = "host.detect_credentials"
     DETECT_CREDENTIALS_RESULT = "host.detect_credentials_result"
+    PROVIDER_USAGE = "host.provider_usage"
+    PROVIDER_USAGE_RESULT = "host.provider_usage_result"
     FS_REQUEST = "host.fs_request"
     FS_RESULT = "host.fs_result"
     MODEL_OPTIONS = "host.model_options"
@@ -792,6 +794,42 @@ class HostDetectCredentialsResultFrame:
 
 
 @dataclass
+class HostProviderUsageFrame:
+    """Server → host: read one provider's quota status.
+
+    On demand only. The probe behind this frame can start a vendor CLI, so it
+    is never issued on a timer — a status surface opening or a manual refresh
+    is what sends it.
+
+    :param request_id: Correlates to the :class:`HostProviderUsageResultFrame`.
+    :param provider_id: The inventory row to report on, e.g. ``"codex"``.
+    :param refresh: Bypass the host's cached reading and probe again.
+    """
+
+    request_id: str
+    provider_id: str
+    refresh: bool = False
+
+
+@dataclass
+class HostProviderUsageResultFrame:
+    """Host → server: a provider's quota status, as the vendor reported it.
+
+    :param request_id: Correlates to the :class:`HostProviderUsageFrame`.
+    :param status: ``"ok"`` when a status was produced (including an honest
+        "unknown"), ``"failed"`` when the host could not produce one at all.
+    :param usage: The usage status object, or ``None`` on failure. Numbers in
+        it always come from the vendor; the host never estimates one.
+    :param error: Non-secret failure reason when *status* is ``"failed"``.
+    """
+
+    request_id: str
+    status: str
+    usage: _JsonObject | None = None
+    error: str | None = None
+
+
+@dataclass
 class HostFsRequestFrame:
     """Server → host: read-only workspace filesystem request.
 
@@ -975,6 +1013,8 @@ HostFrame = (
     | HostStoreSecretResultFrame
     | HostDetectCredentialsFrame
     | HostDetectCredentialsResultFrame
+    | HostProviderUsageFrame
+    | HostProviderUsageResultFrame
     | HostFsRequestFrame
     | HostFsResultFrame
     | HostModelOptionsFrame
@@ -1302,6 +1342,25 @@ def encode_host_frame(frame: HostFrame) -> str:
                 "providers": frame.providers,
             }
         )
+    if isinstance(frame, HostProviderUsageFrame):
+        return _encode_payload(
+            {
+                "kind": HostFrameKind.PROVIDER_USAGE.value,
+                "request_id": frame.request_id,
+                "provider_id": frame.provider_id,
+                "refresh": frame.refresh,
+            }
+        )
+    if isinstance(frame, HostProviderUsageResultFrame):
+        return _encode_payload(
+            {
+                "kind": HostFrameKind.PROVIDER_USAGE_RESULT.value,
+                "request_id": frame.request_id,
+                "status": frame.status,
+                "usage": frame.usage,
+                "error": frame.error,
+            }
+        )
     if isinstance(frame, HostFsRequestFrame):
         return _encode_payload(
             {
@@ -1499,6 +1558,10 @@ def _decode_known_host_frame(
             return HostDetectCredentialsFrame(request_id=_required_str(msg, "request_id"))
         case HostFrameKind.DETECT_CREDENTIALS_RESULT:
             return _decode_detect_credentials_result(msg)
+        case HostFrameKind.PROVIDER_USAGE:
+            return _decode_provider_usage(msg)
+        case HostFrameKind.PROVIDER_USAGE_RESULT:
+            return _decode_provider_usage_result(msg)
         case HostFrameKind.FS_REQUEST:
             return _decode_fs_request(msg)
         case HostFrameKind.FS_RESULT:
@@ -2067,6 +2130,103 @@ def _decode_provider_inventory(raw: object) -> list[_JsonObject]:
             }
         )
     return providers
+
+
+_USAGE_STATES = frozenset(
+    {
+        "available",
+        "partially_used",
+        "nearly_exhausted",
+        "exhausted",
+        "unknown",
+        "authentication_required",
+        "provider_unavailable",
+    }
+)
+
+
+def _decode_provider_usage(msg: _JsonObject) -> HostProviderUsageFrame:
+    """Decode a host.provider_usage request frame."""
+    return HostProviderUsageFrame(
+        request_id=_required_str(msg, "request_id"),
+        provider_id=_required_str(msg, "provider_id"),
+        refresh=msg.get("refresh") is True,
+    )
+
+
+def _decode_usage_window(raw: object) -> _JsonObject | None:
+    """Rebuild one reported quota window from an allowlist."""
+    if not isinstance(raw, dict):
+        return None
+    window_id = raw.get("id")
+    label = raw.get("label")
+    used = raw.get("used_percent")
+    if not isinstance(window_id, str) or not isinstance(label, str):
+        return None
+    if not isinstance(used, (int, float)) or isinstance(used, bool):
+        return None
+    minutes = raw.get("window_minutes")
+    resets_at = raw.get("resets_at")
+    return {
+        "id": window_id,
+        "label": label,
+        "used_percent": float(used),
+        "window_minutes": minutes
+        if isinstance(minutes, int) and not isinstance(minutes, bool)
+        else None,
+        "resets_at": resets_at
+        if isinstance(resets_at, int) and not isinstance(resets_at, bool)
+        else None,
+    }
+
+
+def _decode_usage_status(raw: object) -> _JsonObject | None:
+    """Rebuild a usage status from an allowlist, dropping unknown fields.
+
+    A status whose state this build does not recognize decodes as ``unknown``
+    with its windows dropped: showing percentages under a state we cannot
+    interpret would be worse than showing none.
+    """
+    if not isinstance(raw, dict):
+        return None
+    provider_id = raw.get("provider_id")
+    if not isinstance(provider_id, str):
+        return None
+    state = raw.get("state")
+    known_state = isinstance(state, str) and state in _USAGE_STATES
+    raw_windows = raw.get("windows")
+    windows: list[_JsonObject] = []
+    if known_state and isinstance(raw_windows, list):
+        windows = [
+            window for raw_window in raw_windows if (window := _decode_usage_window(raw_window))
+        ]
+    profile = raw.get("profile")
+    plan = raw.get("plan")
+    message = raw.get("message")
+    checked_at = raw.get("checked_at")
+    return {
+        "provider_id": provider_id,
+        "profile": profile if isinstance(profile, str) else None,
+        "state": state if known_state else "unknown",
+        "windows": windows,
+        "plan": plan if isinstance(plan, str) else None,
+        "message": message if isinstance(message, str) else None,
+        "checked_at": (
+            float(checked_at)
+            if isinstance(checked_at, (int, float)) and not isinstance(checked_at, bool)
+            else 0.0
+        ),
+    }
+
+
+def _decode_provider_usage_result(msg: _JsonObject) -> HostProviderUsageResultFrame:
+    """Decode a host.provider_usage_result frame."""
+    return HostProviderUsageResultFrame(
+        request_id=_required_str(msg, "request_id"),
+        status=_required_str(msg, "status"),
+        usage=_decode_usage_status(msg.get("usage")),
+        error=_optional_nullable_str(msg, "error"),
+    )
 
 
 def _decode_fs_request(msg: _JsonObject) -> HostFsRequestFrame:

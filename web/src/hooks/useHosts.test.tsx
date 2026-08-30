@@ -11,6 +11,8 @@ import {
   useInstallingHarnesses,
   ProviderInventoryError,
   useProviderInventory,
+  useProviderUsage,
+  useRefreshProviderUsage,
   useStoreCredential,
 } from "./useHosts";
 
@@ -559,5 +561,56 @@ describe("useProviderInventory", () => {
 
     expect(result.current.error).toBeInstanceOf(ProviderInventoryError);
     expect((result.current.error as ProviderInventoryError).status).toBe(504);
+  });
+});
+
+describe("useProviderUsage", () => {
+  const usage = {
+    provider_id: "codex",
+    profile: null,
+    state: "nearly_exhausted",
+    windows: [
+      {
+        id: "primary",
+        label: "5-hour limit",
+        used_percent: 95,
+        window_minutes: 300,
+        resets_at: 1788122499,
+      },
+    ],
+    plan: "plus",
+    message: null,
+    checked_at: 1788112841,
+  };
+
+  it("reads one provider's usage without polling", async () => {
+    fetchMock.mockResolvedValueOnce(mockResponse({ usage }));
+
+    const { result } = renderHook(() => useProviderUsage("host_1", "codex", true), { wrapper });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][0]).toBe("/v1/hosts/host_1/providers/codex/usage");
+    expect(result.current.data).toEqual(usage);
+  });
+
+  it("does not probe a host for a row nobody is looking at", async () => {
+    const disabled = renderHook(() => useProviderUsage("host_1", "codex", false), { wrapper });
+    const noProvider = renderHook(() => useProviderUsage("host_1", null, true), { wrapper });
+    await Promise.resolve();
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    disabled.unmount();
+    noProvider.unmount();
+  });
+
+  it("asks the host to bypass its cached reading only on an explicit re-check", async () => {
+    fetchMock.mockResolvedValueOnce(mockResponse({ usage }));
+
+    const { result } = renderHook(() => useRefreshProviderUsage("host_1", "codex"), { wrapper });
+    result.current.mutate();
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+
+    expect(fetchMock.mock.calls[0][0]).toBe("/v1/hosts/host_1/providers/codex/usage?refresh=true");
   });
 });

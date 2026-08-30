@@ -282,6 +282,99 @@ export function useStoreCredential(hostId: string) {
   });
 }
 
+/** How much of a provider's quota is left, exactly as the vendor reported it. */
+export type ProviderUsageState =
+  | "available"
+  | "partially_used"
+  | "nearly_exhausted"
+  | "exhausted"
+  | "unknown"
+  | "authentication_required"
+  | "provider_unavailable";
+
+/** One quota window a provider reported. */
+export interface ProviderUsageWindow {
+  id: string;
+  label: string;
+  used_percent: number;
+  window_minutes: number | null;
+  resets_at: number | null;
+}
+
+/**
+ * A provider's quota status at a moment in time.
+ *
+ * `windows` is empty whenever the vendor reported no numbers — the UI must
+ * then say so rather than drawing an empty meter, which would read as "plenty
+ * left".
+ */
+export interface ProviderUsage {
+  provider_id: string;
+  profile: string | null;
+  state: ProviderUsageState;
+  windows: ProviderUsageWindow[];
+  plan: string | null;
+  message: string | null;
+  /** Unix seconds when the host took the reading. */
+  checked_at: number;
+}
+
+async function fetchProviderUsage(
+  hostId: string,
+  providerId: string,
+  refresh: boolean,
+): Promise<ProviderUsage | null> {
+  const res = await authenticatedFetch(
+    `/v1/hosts/${encodeURIComponent(hostId)}/providers/` +
+      `${encodeURIComponent(providerId)}/usage${refresh ? "?refresh=true" : ""}`,
+  );
+  if (!res.ok) throw new ProviderInventoryError(res.status, `${res.status} ${res.statusText}`);
+  const body = (await res.json()) as { usage?: ProviderUsage };
+  return body.usage ?? null;
+}
+
+function providerUsageKey(
+  hostId: string | null | undefined,
+  providerId: string | null | undefined,
+) {
+  return ["provider-usage", hostId, providerId];
+}
+
+/**
+ * Read one provider's quota status on demand.
+ *
+ * Never polled: answering can start a vendor CLI on the host, so this fires
+ * when a status surface asks and then serves the host's cached reading. An
+ * explicit re-probe goes through {@link useRefreshProviderUsage}.
+ */
+export function useProviderUsage(
+  hostId: string | null | undefined,
+  providerId: string | null | undefined,
+  enabled: boolean,
+) {
+  return useQuery({
+    queryKey: providerUsageKey(hostId, providerId),
+    queryFn: () => fetchProviderUsage(hostId ?? "", providerId ?? "", false),
+    enabled: enabled && !!hostId && !!providerId,
+    staleTime: 60_000,
+    refetchInterval: false,
+  });
+}
+
+/** Re-probe one provider's quota, bypassing the host's cached reading. */
+export function useRefreshProviderUsage(
+  hostId: string | null | undefined,
+  providerId: string | null | undefined,
+) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => fetchProviderUsage(hostId ?? "", providerId ?? "", true),
+    onSuccess: (usage) => {
+      queryClient.setQueryData(providerUsageKey(hostId, providerId), usage);
+    },
+  });
+}
+
 /** A credential already on the host, offered for one-click adopt (non-secret). */
 export interface DetectedCredential {
   family: string;

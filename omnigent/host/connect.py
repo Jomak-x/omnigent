@@ -68,6 +68,8 @@ from omnigent.host.frames import (
     HostListWorktreesResultFrame,
     HostModelOptionsFrame,
     HostModelOptionsResultFrame,
+    HostProviderUsageFrame,
+    HostProviderUsageResultFrame,
     HostRemoveWorktreeFrame,
     HostRemoveWorktreeResultFrame,
     HostRunnerExitedFrame,
@@ -107,7 +109,11 @@ from omnigent.onboarding.harness_readiness import (
     harness_is_configured,
 )
 from omnigent.onboarding.provider_config import ANTHROPIC_FAMILY, OPENAI_FAMILY
-from omnigent.onboarding.provider_inventory import build_provider_inventory
+from omnigent.onboarding.provider_inventory import (
+    ProviderInventoryEntry,
+    build_provider_inventory,
+)
+from omnigent.onboarding.provider_usage import UsageState, unknown_usage
 from omnigent.process_logging import (
     LOG_TTY_FD_ENV_VAR,
     PROCESS_LOG_FILE_ENV_VAR,
@@ -2490,6 +2496,54 @@ class HostProcess:
             providers=providers,
         )
 
+    async def _handle_provider_usage(
+        self,
+        frame: HostProviderUsageFrame,
+    ) -> HostProviderUsageResultFrame:
+        """Report one provider's quota status, as its vendor reports it.
+
+        Only providers whose vendor exposes limits locally can answer. Codex
+        does, through its own app-server; everything else settles as an honest
+        "not reported" rather than an invented number.
+        """
+        row = await asyncio.to_thread(self._provider_row_for_usage, frame.provider_id)
+        if row is None:
+            return HostProviderUsageResultFrame(
+                request_id=frame.request_id,
+                status="ok",
+                usage=unknown_usage(
+                    frame.provider_id,
+                    "This host has no provider by that name.",
+                    state=UsageState.PROVIDER_UNAVAILABLE,
+                ).as_dict(),
+            )
+        if row.cli != "codex":
+            return HostProviderUsageResultFrame(
+                request_id=frame.request_id,
+                status="ok",
+                usage=unknown_usage(
+                    frame.provider_id,
+                    "This provider does not report usage limits to Omnigent.",
+                ).as_dict(),
+            )
+        from omnigent.codex_usage import codex_usage_status
+
+        status = await codex_usage_status(frame.provider_id, refresh=frame.refresh)
+        return HostProviderUsageResultFrame(
+            request_id=frame.request_id,
+            status="ok",
+            usage=status.as_dict(),
+        )
+
+    def _provider_row_for_usage(self, provider_id: str) -> ProviderInventoryEntry | None:
+        """Find one inventory row by id, reusing the shared detection."""
+        try:
+            inventory = build_provider_inventory(harness_readiness=self._configured_harnesses)
+        except Exception:
+            _logger.exception("Failed to build the provider inventory for a usage read")
+            return None
+        return next((row for row in inventory if row.provider_id == provider_id), None)
+
     def _handle_fs_request(self, frame: HostFsRequestFrame) -> HostFsResultFrame:
         """Serve a read-only workspace filesystem request from the host.
 
@@ -3767,6 +3821,19 @@ class HostProcess:
             # off the event loop.
             credentials_result = await asyncio.to_thread(self._handle_detect_credentials, frame)
             await ws.send(encode_host_frame(credentials_result))
+        elif isinstance(frame, HostProviderUsageFrame):
+            # The usage probe can start a vendor CLI, so a crash must still
+            # settle the server's future rather than leave it pending.
+            try:
+                usage_result = await self._handle_provider_usage(frame)
+            except Exception:
+                _logger.exception("Provider usage read crashed for %r", frame.provider_id)
+                usage_result = HostProviderUsageResultFrame(
+                    request_id=frame.request_id,
+                    status="failed",
+                    error=f"usage read crashed for {frame.provider_id!r}",
+                )
+            await ws.send(encode_host_frame(usage_result))
         elif isinstance(frame, HostCreateWorktreeFrame):
             await ws.send(encode_host_frame(await self._handle_create_worktree(frame)))
         elif isinstance(frame, HostRemoveWorktreeFrame):

@@ -9,7 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type * as AgentLabelsModule from "@/lib/agentLabels";
-import type { Host, ProviderInventoryEntry } from "@/hooks/useHosts";
+import type { Host, ProviderInventoryEntry, ProviderUsage } from "@/hooks/useHosts";
 
 const mocks = vi.hoisted(() => ({
   hostsLoading: false,
@@ -21,6 +21,10 @@ const mocks = vi.hoisted(() => ({
   inventoryErrorObj: null as Error | null,
   providers: [] as ProviderInventoryEntry[],
   refetch: vi.fn(),
+  usage: null as ProviderUsage | null,
+  usagePending: false,
+  usageError: false,
+  refreshUsage: vi.fn(),
   setupSteps: {} as Record<string, unknown[]>,
   lastSetupProps: null as { harness: string | null; host: Host | null | undefined } | null,
 }));
@@ -47,6 +51,15 @@ vi.mock("@/hooks/useHosts", () => ({
       refetch: mocks.refetch,
     };
   },
+  useProviderUsage: () => ({
+    data: mocks.usage,
+    isPending: mocks.usagePending,
+    isError: mocks.usageError,
+  }),
+  useRefreshProviderUsage: () => ({
+    mutate: mocks.refreshUsage,
+    isPending: false,
+  }),
 }));
 vi.mock("@/lib/agentLabels", async (importOriginal) => {
   const original = await importOriginal<typeof AgentLabelsModule>();
@@ -170,6 +183,10 @@ beforeEach(() => {
   mocks.inventoryErrorObj = null;
   mocks.providers = [];
   mocks.refetch.mockReset();
+  mocks.usage = null;
+  mocks.usagePending = false;
+  mocks.usageError = false;
+  mocks.refreshUsage.mockReset();
   mocks.setupSteps = {};
   mocks.lastSetupProps = null;
 });
@@ -347,6 +364,102 @@ describe("ProvidersSection", () => {
     const block = screen.getByTestId("provider-error");
     expect(block).toHaveAttribute("data-state", "unavailable");
     expect(block).toHaveTextContent("Host unavailable");
+  });
+
+  const CODEX_CAPABILITIES = {
+    model_discovery: "supported",
+    usage_status: "supported",
+    multiple_profiles: "unsupported",
+    interactive_cli: "supported",
+  } as const;
+
+  function codexRow(): ProviderInventoryEntry {
+    return provider({
+      id: "codex",
+      display_name: "Codex",
+      cli: "codex",
+      capabilities: CODEX_CAPABILITIES,
+    });
+  }
+
+  function usageStatus(partial: Partial<ProviderUsage> = {}): ProviderUsage {
+    return {
+      provider_id: "codex",
+      profile: null,
+      state: "exhausted",
+      windows: [],
+      plan: "plus",
+      message: null,
+      checked_at: Date.now() / 1000,
+      ...partial,
+    };
+  }
+
+  it("draws each reported quota window, binding limit first", () => {
+    mocks.providers = [codexRow()];
+    mocks.usage = usageStatus({
+      windows: [
+        {
+          id: "secondary",
+          label: "Weekly limit",
+          used_percent: 47,
+          window_minutes: 10080,
+          resets_at: Date.now() / 1000 + 3 * 86400,
+        },
+        {
+          id: "primary",
+          label: "5-hour limit",
+          used_percent: 100,
+          window_minutes: 300,
+          resets_at: Date.now() / 1000 + 2 * 3600,
+        },
+      ],
+    });
+    renderPage();
+
+    const block = screen.getByTestId("provider-usage-codex");
+    expect(block).toHaveAttribute("data-state", "exhausted");
+    expect(within(block).getByText("Exhausted")).toBeInTheDocument();
+    expect(within(block).getByText("plus")).toBeInTheDocument();
+    const windows = within(block).getAllByText(/limit$/);
+    expect(windows.map((node) => node.textContent)).toEqual(["5-hour limit", "Weekly limit"]);
+    expect(within(block).getByText("100% used · resets in 2 hours")).toBeInTheDocument();
+    expect(within(block).getByText("47% used · resets in 3 days")).toBeInTheDocument();
+  });
+
+  it("says nothing was reported rather than drawing an empty meter", () => {
+    mocks.providers = [codexRow()];
+    mocks.usage = usageStatus({
+      state: "unknown",
+      windows: [],
+      message: "This version of the codex CLI does not report usage limits.",
+    });
+    renderPage();
+
+    const block = screen.getByTestId("provider-usage-codex");
+    expect(within(block).getByText("Not reported")).toBeInTheDocument();
+    expect(
+      within(block).getByText("This version of the codex CLI does not report usage limits."),
+    ).toBeInTheDocument();
+    expect(screen.queryByTestId("provider-usage-window-codex-primary")).toBeNull();
+  });
+
+  it("re-probes only when asked", () => {
+    mocks.providers = [codexRow()];
+    mocks.usage = usageStatus({ state: "available" });
+    renderPage();
+
+    expect(mocks.refreshUsage).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByTestId("provider-usage-refresh-codex"));
+    expect(mocks.refreshUsage).toHaveBeenCalledTimes(1);
+  });
+
+  it("omits usage entirely for a provider that cannot report it", () => {
+    mocks.providers = [provider({ id: "work", display_name: "Work", kind: "gateway" })];
+    mocks.usage = usageStatus();
+    renderPage();
+
+    expect(screen.queryByTestId("provider-usage-work")).toBeNull();
   });
 
   it("shows loading states for hosts and inventory", () => {

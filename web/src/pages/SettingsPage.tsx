@@ -102,9 +102,21 @@ import { Badge } from "@/components/ui/badge";
 import {
   useHosts,
   useProviderInventory,
+  useProviderUsage,
+  useRefreshProviderUsage,
   type ProviderCapabilitySupport,
   type ProviderInventoryEntry,
 } from "@/hooks/useHosts";
+import {
+  barWidthPercent,
+  checkedLabel,
+  hasReportedWindows,
+  orderedWindows,
+  resetLabel,
+  usagePresentation,
+  windowTone,
+  type UsageTone,
+} from "@/lib/providerUsage";
 import {
   providerConnectionState,
   providerFetchLabel,
@@ -948,6 +960,13 @@ const PROVIDER_TONE_TEXT: Record<ProviderStateTone, string> = {
   muted: "text-muted-foreground",
 };
 
+const USAGE_BAR_CLASS: Record<UsageTone, string> = {
+  ok: "bg-emerald-600 dark:bg-emerald-500",
+  warning: "bg-amber-600 dark:bg-amber-500",
+  error: "bg-destructive",
+  muted: "bg-muted-foreground",
+};
+
 const PROVIDER_TONE_ICON_CLASS: Record<ProviderStateTone, string> = {
   ok: "text-emerald-600 dark:text-emerald-500",
   warning: "text-amber-600 dark:text-amber-500",
@@ -997,11 +1016,112 @@ function CapabilityChip({ label, state }: { label: string; state: ProviderCapabi
   );
 }
 
+/**
+ * Quota status for one provider, shown only where the vendor reports it.
+ *
+ * Fetched per row, on demand, with an explicit re-probe button — the host may
+ * start a vendor CLI to answer, so this must never become a poll. A provider
+ * that reports no numbers says so; it never renders an empty meter.
+ */
+function ProviderUsageBlock({
+  hostId,
+  provider,
+}: {
+  hostId: string;
+  provider: ProviderInventoryEntry;
+}) {
+  const usageQuery = useProviderUsage(hostId, provider.id, true);
+  const refresh = useRefreshProviderUsage(hostId, provider.id);
+  const usage = usageQuery.data ?? null;
+  const now = Date.now();
+
+  if (usageQuery.isPending) {
+    return (
+      <p
+        className="mt-2 flex items-center gap-1.5 text-sm text-muted-foreground"
+        data-testid={`provider-usage-loading-${provider.id}`}
+      >
+        <Loader2Icon className="size-3.5 animate-spin" />
+        Reading usage…
+      </p>
+    );
+  }
+  if (usageQuery.isError || !usage) {
+    return (
+      <p
+        className="mt-2 text-sm text-muted-foreground"
+        data-testid={`provider-usage-error-${provider.id}`}
+      >
+        Usage could not be read from this host.
+      </p>
+    );
+  }
+
+  const presentation = usagePresentation(usage.state);
+  const checked = checkedLabel(usage.checked_at, now);
+  return (
+    <div className="mt-2" data-testid={`provider-usage-${provider.id}`} data-state={usage.state}>
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
+        <span className="text-muted-foreground">Usage:</span>
+        <span className={PROVIDER_TONE_TEXT[presentation.tone]}>{presentation.label}</span>
+        {usage.plan && <Badge variant="outline">{usage.plan}</Badge>}
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-6 gap-1.5 px-2"
+          onClick={() => refresh.mutate()}
+          disabled={refresh.isPending}
+          data-testid={`provider-usage-refresh-${provider.id}`}
+        >
+          <RefreshCwIcon className={`size-3 ${refresh.isPending ? "animate-spin" : ""}`} />
+          Re-check
+        </Button>
+      </div>
+      {hasReportedWindows(usage) ? (
+        <div className="mt-1.5 flex flex-col gap-1.5">
+          {orderedWindows(usage).map((window) => {
+            const resets = resetLabel(window.resets_at, now);
+            return (
+              <div
+                key={window.id}
+                data-testid={`provider-usage-window-${provider.id}-${window.id}`}
+              >
+                <div className="flex items-baseline justify-between gap-2 text-sm">
+                  <span>{window.label}</span>
+                  <span className="text-muted-foreground">
+                    {Math.round(window.used_percent)}% used{resets ? ` · ${resets}` : ""}
+                  </span>
+                </div>
+                <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-muted">
+                  <div
+                    className={`h-full rounded-full ${USAGE_BAR_CLASS[windowTone(window.used_percent)]}`}
+                    style={{ width: `${barWidthPercent(window.used_percent)}%` }}
+                  />
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        <p className="mt-1 text-sm text-muted-foreground">
+          {usage.message ?? "This provider reported no usage limits."}
+        </p>
+      )}
+      {hasReportedWindows(usage) && usage.message && (
+        <p className="mt-1 text-sm text-muted-foreground">{usage.message}</p>
+      )}
+      {checked && <p className="mt-1 text-xs text-muted-foreground">{checked}</p>}
+    </div>
+  );
+}
+
 function ProviderRow({
+  hostId,
   provider,
   manageHarness,
   onManage,
 }: {
+  hostId: string;
   provider: ProviderInventoryEntry;
   manageHarness: string | null;
   onManage: (harness: string) => void;
@@ -1064,6 +1184,9 @@ function ProviderRow({
             />
             <CapabilityChip label="Interactive CLI" state={provider.capabilities.interactive_cli} />
           </div>
+          {provider.capabilities.usage_status === "supported" && (
+            <ProviderUsageBlock hostId={hostId} provider={provider} />
+          )}
         </div>
         {manageHarness && (
           <Button
@@ -1208,6 +1331,7 @@ function ProvidersSection() {
         {providers.map((provider) => (
           <ProviderRow
             key={provider.id}
+            hostId={host?.host_id ?? ""}
             provider={provider}
             manageHarness={providerManageHarness(provider, setupStepsByHarness)}
             onManage={setManageHarness}

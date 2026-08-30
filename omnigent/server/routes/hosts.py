@@ -35,6 +35,7 @@ from omnigent.host.frames import (
     HostInstallHarnessFrame,
     HostLaunchRunnerFrame,
     HostListDirFrame,
+    HostProviderUsageFrame,
     HostStoreSecretFrame,
     encode_host_frame,
     optional_str_bool_map,
@@ -421,6 +422,60 @@ async def _proxy_detect_credentials(
             ) from exc
     finally:
         host_conn.pending_credential_detects.pop(request_id, None)
+
+
+# One probe can start a vendor CLI, so this is longer than a config read but
+# still bounded: a hung probe must surface as a timeout, never as a spinner.
+_PROVIDER_USAGE_TIMEOUT_S = 45.0
+
+
+async def _proxy_provider_usage(
+    *,
+    host_registry: HostRegistry,
+    host_conn: HostConnection,
+    provider_id: str,
+    refresh: bool,
+) -> dict[str, Any]:
+    """Forward a ``host.provider_usage`` frame and await the result.
+
+    :param host_registry: Server-side registry; used to enqueue the frame.
+    :param host_conn: Live host connection.
+    :param provider_id: The inventory row to report on.
+    :param refresh: Ask the host to bypass its cached reading.
+    :returns: Dict with ``status`` and the ``usage`` object.
+    :raises HTTPException: 504 on timeout, 502 on connection drop.
+    """
+    request_id = secrets.token_hex(8)
+    loop = asyncio.get_running_loop()
+    future: asyncio.Future[dict[str, Any]] = loop.create_future()
+    host_conn.pending_provider_usage[request_id] = future
+    frame = encode_host_frame(
+        HostProviderUsageFrame(
+            request_id=request_id,
+            provider_id=provider_id,
+            refresh=refresh,
+        )
+    )
+    try:
+        try:
+            host_registry.send_text(host_conn, frame)
+        except ConnectionError as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"host '{host_conn.host_id}' connection lost",
+            ) from exc
+        try:
+            return await asyncio.wait_for(future, timeout=_PROVIDER_USAGE_TIMEOUT_S)
+        except asyncio.TimeoutError as exc:
+            raise HTTPException(
+                status_code=504,
+                detail=(
+                    f"host '{host_conn.host_id}' did not report provider usage within "
+                    f"{_PROVIDER_USAGE_TIMEOUT_S:.0f}s"
+                ),
+            ) from exc
+    finally:
+        host_conn.pending_provider_usage.pop(request_id, None)
 
 
 class CreateDirectoryRequest(BaseModel):
@@ -1550,6 +1605,47 @@ def create_hosts_router(
             "object": "provider_inventory",
             "providers": result.get("providers") or [],
         }
+
+    @router.get("/hosts/{host_id}/providers/{provider_id}/usage")
+    async def read_host_provider_usage(
+        request: Request,
+        host_id: str,
+        provider_id: str,
+        refresh: bool = False,
+    ) -> dict[str, Any]:
+        """Report one provider's quota status as its vendor reports it.
+
+        On demand only — the host may start a vendor CLI to answer, so this is
+        never polled on a timer. Percentages come from the provider; a provider
+        that exposes nothing answers with an explicit "unknown" state rather
+        than an estimate.
+        """
+        if not flags.enabled(Feature.HARNESS_INSTALL):
+            raise HTTPException(status_code=404, detail="not found")
+
+        user_id = require_user(request, auth_provider)
+        host = await asyncio.to_thread(host_store.get_host, host_id)
+        if host is None:
+            raise HTTPException(status_code=404, detail="host not found")
+        if user_id is not None and host.user_id != user_id:
+            raise HTTPException(status_code=403, detail="not your host")
+
+        conn = host_registry.get(host.host_id)
+        if conn is None:
+            raise _host_absent_error(host)
+
+        result = await _proxy_provider_usage(
+            host_registry=host_registry,
+            host_conn=conn,
+            provider_id=provider_id,
+            refresh=refresh,
+        )
+        if result.get("status") != "ok" or not isinstance(result.get("usage"), dict):
+            raise HTTPException(
+                status_code=502,
+                detail=str(result.get("error") or "host usage read failed"),
+            )
+        return {"object": "provider_usage", "usage": result["usage"]}
 
     @router.get("/hosts/{host_id}/worktrees")
     async def list_host_worktrees(

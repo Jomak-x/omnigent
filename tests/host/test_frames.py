@@ -34,6 +34,8 @@ from omnigent.host.frames import (
     HostListWorktreesResultFrame,
     HostModelOptionsFrame,
     HostModelOptionsResultFrame,
+    HostProviderUsageFrame,
+    HostProviderUsageResultFrame,
     HostRemoveWorktreeFrame,
     HostRemoveWorktreeResultFrame,
     HostRunnerExitedFrame,
@@ -1645,6 +1647,91 @@ def test_known_connection_state_survives_the_tunnel() -> None:
 
     assert row["connection_state"] == "authentication_required"
     assert row["connection_detail"] == "Sign in on this host to use it."
+
+
+def _usage_payload(**overrides: object) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "provider_id": "codex",
+        "profile": None,
+        "state": "nearly_exhausted",
+        "windows": [
+            {
+                "id": "primary",
+                "label": "5-hour limit",
+                "used_percent": 95.0,
+                "window_minutes": 300,
+                "resets_at": 1788122499,
+            }
+        ],
+        "plan": "plus",
+        "message": None,
+        "checked_at": 1788112841.0,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _decode_usage(payload: object) -> HostProviderUsageResultFrame:
+    decoded = decode_host_frame(
+        json.dumps(
+            {
+                "kind": "host.provider_usage_result",
+                "request_id": "u1",
+                "status": "ok",
+                "usage": payload,
+            }
+        )
+    )
+    assert isinstance(decoded, HostProviderUsageResultFrame)
+    return decoded
+
+
+def test_provider_usage_round_trip() -> None:
+    request = HostProviderUsageFrame(request_id="u1", provider_id="codex", refresh=True)
+    decoded_request = decode_host_frame(encode_host_frame(request))
+    assert isinstance(decoded_request, HostProviderUsageFrame)
+    assert (decoded_request.provider_id, decoded_request.refresh) == ("codex", True)
+
+    result = HostProviderUsageResultFrame(request_id="u1", status="ok", usage=_usage_payload())
+    decoded = decode_host_frame(encode_host_frame(result))
+    assert isinstance(decoded, HostProviderUsageResultFrame)
+    assert decoded.usage == _usage_payload()
+
+
+def test_usage_windows_without_a_percentage_are_dropped() -> None:
+    decoded = _decode_usage(
+        _usage_payload(windows=[{"id": "primary", "label": "5-hour limit"}, "junk"])
+    )
+
+    assert decoded.usage is not None
+    assert decoded.usage["windows"] == []
+
+
+def test_an_unrecognized_usage_state_drops_its_numbers() -> None:
+    """Percentages under a state this build cannot interpret are worse than none."""
+    decoded = _decode_usage(_usage_payload(state="quantum"))
+
+    assert decoded.usage is not None
+    assert decoded.usage["state"] == "unknown"
+    assert decoded.usage["windows"] == []
+
+
+def test_a_failed_usage_read_decodes_without_a_payload() -> None:
+    decoded = decode_host_frame(
+        json.dumps(
+            {
+                "kind": "host.provider_usage_result",
+                "request_id": "u2",
+                "status": "failed",
+                "usage": None,
+                "error": "probe crashed",
+            }
+        )
+    )
+
+    assert isinstance(decoded, HostProviderUsageResultFrame)
+    assert decoded.usage is None
+    assert decoded.error == "probe crashed"
 
 
 def test_fs_request_round_trip() -> None:
