@@ -234,7 +234,12 @@ def _hex_send_keys_commands(target: str, data: bytes) -> list[bytes]:
     return commands
 
 
-async def _run_tmux_capture(socket_path: str, tmux_target: str) -> bytes | None:
+async def _run_tmux_capture(
+    socket_path: str,
+    tmux_target: str,
+    *,
+    include_scrollback: bool = True,
+) -> bytes | None:
     """Capture the current pane screen (with escapes) to seed the browser view.
 
     A control client only receives ``%output`` produced after it attaches, so
@@ -283,6 +288,8 @@ async def _run_tmux_capture(socket_path: str, tmux_target: str) -> bytes | None:
 
     :param socket_path: tmux server socket path.
     :param tmux_target: The ``-t`` target, e.g. ``"main"``.
+    :param include_scrollback: Include primary-screen history in addition to
+        the current visible pane. Alternate-screen history is always excluded.
     :returns: The captured bytes to write into xterm, or ``None`` on failure
         (the caller proceeds without a seed rather than aborting the attach).
     """
@@ -294,7 +301,7 @@ async def _run_tmux_capture(socket_path: str, tmux_target: str) -> bytes | None:
     # alternate screen ``-S -`` leaks stale primary history (see docstring).
     # ``-J`` joins soft-wrapped rows into logical lines (see docstring).
     capture_args = ["capture-pane", "-e", "-p", "-J", "-t", tmux_target]
-    if meta is not None and not meta.alternate_on:
+    if include_scrollback and meta is not None and not meta.alternate_on:
         capture_args += ["-S", "-"]
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -502,6 +509,8 @@ async def bridge_tmux_control_to_websocket(
     socket_path: str,
     tmux_target: str,
     read_only: bool,
+    seed_output: bool = True,
+    seed_scrollback: bool = True,
     on_client_interaction: Callable[[], None] | None = None,
     reader_done: asyncio.Event | None = None,
     forward_done: asyncio.Event | None = None,
@@ -517,6 +526,10 @@ async def bridge_tmux_control_to_websocket(
     :param tmux_target: The ``-t`` target string identifying the session.
     :param read_only: When ``True``, attach with ``-r`` *and* drop inbound
         binary input frames at the application layer (defense in depth).
+    :param seed_output: Whether to seed the new client from the pane's existing
+        screen before forwarding live output.
+    :param seed_scrollback: Whether the seed includes primary-screen history.
+        Ignored when ``seed_output`` is false.
     :param on_client_interaction: Optional callback fired on every client
         interaction (connect, disconnect, each input/resize frame) so the
         idle watcher can discount client-driven repaints.
@@ -543,10 +556,15 @@ async def bridge_tmux_control_to_websocket(
     # Seed the browser terminal with the current screen BEFORE attaching so no
     # pre-attach content is missing. Failure is non-fatal — a live pane redraw
     # will repaint it shortly.
-    seed = await _run_tmux_capture(socket_path, tmux_target)
-    if seed:
-        with contextlib.suppress(RuntimeError, WebSocketDisconnect):
-            await websocket.send_bytes(seed)
+    if seed_output:
+        seed = await _run_tmux_capture(
+            socket_path,
+            tmux_target,
+            include_scrollback=seed_scrollback,
+        )
+        if seed:
+            with contextlib.suppress(RuntimeError, WebSocketDisconnect):
+                await websocket.send_bytes(seed)
 
     argv = [tmux, "-S", socket_path, "-f", "/dev/null", "-C", "attach"]
     if read_only:
