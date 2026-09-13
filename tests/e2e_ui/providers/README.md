@@ -35,6 +35,10 @@ replacing `run.py` above and choosing fresh state and recording paths:
   host API replacement, advanced-field preservation, owned/shared secret
   cleanup, provider and harness controls, ACP add/remove and import fingerprint
   validation, and rejection of malformed configuration before secret storage.
+- `run_fault_injection.py` injects simultaneous configuration-save and staged
+  secret-cleanup failures on one disposable host. It checks the browser's
+  sanitized error, unchanged original configuration/credential, the disclosed
+  leftover staged slot, and recovery through a subsequent save and reload.
 - `run_guided.py` additionally requires `--tmux /absolute/path/to/reviewed/tmux`.
   It runs a dummy vendor command in a real tmux terminal, checks rendered prompt
   pixels, reconnect without input replay, completion and scoped cancellation,
