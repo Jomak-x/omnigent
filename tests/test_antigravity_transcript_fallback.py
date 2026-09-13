@@ -175,6 +175,28 @@ def test_tui_interrupt_only_sends_escape_for_active_pane(
     assert sent == [(str(tmp_path / "tmux.sock"), "send-keys", "-t", "main", "Escape")]
 
 
+@pytest.mark.parametrize(
+    ("reason", "failed", "cancelled"),
+    [
+        ("ERROR", True, False),
+        ("USER_CANCELED", False, True),
+        ("error", False, False),
+        ("user_canceled", False, False),
+        ("USER_CANCELLED", False, False),
+    ],
+)
+def test_stop_hook_recognizes_only_observed_reasons(
+    tmp_path: Path, reason: str, failed: bool, cancelled: bool
+) -> None:
+    assert record_stop_event(
+        tmp_path,
+        {"conversationId": CONVERSATION_ID, "fullyIdle": True, "terminationReason": reason},
+    )
+    recorded = json.loads((tmp_path / STOP_EVENTS_FILE).read_text())
+    assert recorded["failed"] is failed
+    assert recorded["cancelled"] is cancelled
+
+
 def test_stop_hook_records_only_completion_metadata(tmp_path: Path) -> None:
     payload = {
         "conversationId": CONVERSATION_ID,

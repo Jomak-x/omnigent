@@ -33,10 +33,8 @@ def record_stop_event(bridge_dir: Path, payload: object) -> bool:
     event: dict[str, object] = {
         "conversation_id": conversation_id,
         "fully_idle": True,
-        "failed": bool(payload.get("error"))
-        or (isinstance(reason, str) and reason.casefold() == "error"),
-        "cancelled": isinstance(reason, str)
-        and reason.casefold() in {"user_canceled", "user_cancelled"},
+        "failed": bool(payload.get("error")) or reason == "ERROR",
+        "cancelled": reason == "USER_CANCELED",
     }
     boundary = transcript_boundary(bridge_dir, conversation_id)
     event["transcript_boundary"] = list(boundary) if boundary is not None else None

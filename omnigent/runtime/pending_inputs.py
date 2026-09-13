@@ -134,6 +134,8 @@ class DrainedInput:
     created_by: str | None = None
     stable_id: str | None = None
     background_titles_enabled: bool = True
+    matching_content: list[dict[str, Any]] | None = None
+    preceding_pending_ids: tuple[str, ...] = ()
 
 
 @dataclass
@@ -171,6 +173,7 @@ class _Entry:
     created_by: str | None = None
     stable_id: str | None = None
     background_titles_enabled: bool = True
+    matching_content: list[dict[str, Any]] | None = None
     # Lambda (not ``_now`` directly) so a monkeypatched ``_now`` is
     # resolved at construction time rather than bound at class def.
     created_at: float = field(default_factory=lambda: _now())
@@ -259,6 +262,15 @@ def record(
     return pending_id
 
 
+def set_matching_content(
+    conversation_id: str, pending_id: str, content: list[dict[str, Any]]
+) -> None:
+    with _lock:
+        entry = _pending.get(conversation_id, {}).get(pending_id)
+        if entry is not None:
+            entry.matching_content = copy.deepcopy(content)
+
+
 def resolve(conversation_id: str, pending_id: str) -> None:
     """
     Drop a pending entry by id.
@@ -315,23 +327,16 @@ def resolve_oldest(conversation_id: str) -> DrainedInput | None:
         entry = entries.pop(oldest_id)
         if not entries:
             _pending.pop(conversation_id, None)
-        return DrainedInput(
-            pending_id=entry.pending_id,
-            content=copy.deepcopy(entry.content),
-            created_by=entry.created_by,
-            stable_id=entry.stable_id,
-            background_titles_enabled=entry.background_titles_enabled,
-        )
+        return _drained_input(entry)
 
 
 def restore(conversation_id: str, drained: DrainedInput) -> None:
     """
-    Put a drained entry back at the FRONT of the pending queue.
+    Restore a drained entry in its pending queue position.
 
     Compensation for a drain whose persist turned out to be a duplicate
     (an idempotent external-item append deduplicated the retry): the
-    entry belongs to the NEXT user message, and it was the oldest when
-    drained, so it returns to the head to keep FIFO intact.
+    entry belongs to the NEXT user message and retains its queue ordering.
 
     :param conversation_id: Conversation/session id, e.g.
         ``"conv_abc123"``.
@@ -344,10 +349,21 @@ def restore(conversation_id: str, drained: DrainedInput) -> None:
         created_by=drained.created_by,
         stable_id=drained.stable_id,
         background_titles_enabled=drained.background_titles_enabled,
+        matching_content=copy.deepcopy(drained.matching_content),
     )
     with _lock:
         entries = _pending.get(conversation_id, {})
-        _pending[conversation_id] = {drained.pending_id: entry, **entries}
+        preceding = {
+            pending_id: existing
+            for pending_id, existing in entries.items()
+            if pending_id in drained.preceding_pending_ids
+        }
+        following = {
+            pending_id: existing
+            for pending_id, existing in entries.items()
+            if pending_id not in preceding
+        }
+        _pending[conversation_id] = {**preceding, drained.pending_id: entry, **following}
 
 
 def resolve_matching_text(
@@ -410,18 +426,21 @@ def resolve_matching_antigravity_text(conversation_id: str, text: str) -> Draine
         entries = _pending.get(conversation_id)
         if entries is None:
             return None
-        matches = [
-            (pending_id, entry)
-            for pending_id, entry in entries.items()
-            if _matches_antigravity_transport(entry.content, text)
-        ]
-        if len(matches) != 1:
-            return None
-        pending_id, entry = matches[0]
-        entries.pop(pending_id)
-        if not entries:
-            _pending.pop(conversation_id, None)
-        return _drained_input(entry)
+        preceding_pending_ids: list[str] = []
+        for pending_id, entry in entries.items():
+            content = entry.matching_content
+            if not _matches_antigravity_transport(
+                content if content is not None else entry.content, text
+            ):
+                preceding_pending_ids.append(pending_id)
+                continue
+            entries.pop(pending_id)
+            if not entries:
+                _pending.pop(conversation_id, None)
+            drained = _drained_input(entry)
+            drained.preceding_pending_ids = tuple(preceding_pending_ids)
+            return drained
+        return None
 
 
 def has_pending(conversation_id: str) -> bool:
@@ -487,6 +506,7 @@ def _drained_input(entry: _Entry) -> DrainedInput:
         created_by=entry.created_by,
         stable_id=entry.stable_id,
         background_titles_enabled=entry.background_titles_enabled,
+        matching_content=copy.deepcopy(entry.matching_content),
     )
 
 

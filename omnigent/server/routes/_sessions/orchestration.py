@@ -4514,6 +4514,7 @@ async def _forward_native_terminal_message(
     file_store: FileStore | None = None,
     artifact_store: ArtifactStore | None = None,
     model_override: str | None = None,
+    pending_id: str | None = None,
 ) -> None:
     """
     Forward one Omnigent web-chat message to the native terminal harness.
@@ -4537,6 +4538,8 @@ async def _forward_native_terminal_message(
         in-band on the message so the executor applies ``/model`` and the
         inject under one lock (no separate racing ``model_change``).
         ``None`` when routing did not pick a model.
+    :param pending_id: Pending web input to associate with the resolved
+        Antigravity transport content.
     :returns: None.
     :raises HTTPException: 502 when the runner or harness rejects
         the injection request.
@@ -4569,6 +4572,12 @@ async def _forward_native_terminal_message(
                 artifact_store,
                 session_id=session_id,
             )
+            if harness == "antigravity-native" and pending_id is not None:
+                pending_inputs.set_matching_content(
+                    session_id,
+                    pending_id,
+                    event["content"],
+                )
         except (ValueError, KeyError):
             _logger.warning(
                 "File reference resolution failed for native session=%s",
@@ -6118,6 +6127,11 @@ async def _dispatch_session_event_to_runner_impl(
                 # routed id; ``None`` when the pane has no spelling for it.
                 model_override=(
                     _native_routed_model if _native_applied_model is not None else None
+                ),
+                pending_id=(
+                    pending_id
+                    if _native_terminal_runtime(conv)[2] == "antigravity-native"
+                    else None
                 ),
             )
             forwarded = True
