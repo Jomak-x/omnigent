@@ -226,7 +226,9 @@ async def test_antigravity_unconfirmed_cancel_returns_503_without_parent_wake(
     monkeypatch.setattr(executor, "turn_is_idle_via_tui", lambda _bridge: transport == "idle")
     monkeypatch.setattr(executor, "wait_for_turn_idle_via_tui", _confirm_idle)
     monkeypatch.setattr(
-        executor, "resolve_language_server_port", lambda _cid: 43210 if transport == "rpc" else None
+        executor,
+        "resolve_language_server_port",
+        lambda _cid: 43210 if transport == "rpc" else None,
     )
     monkeypatch.setattr(
         executor, "cancel_cascade_steps", lambda _port, _cid: calls.append("rpc") or True

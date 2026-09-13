@@ -465,9 +465,7 @@ def test_interrupt_session_rpc_failure_returns_false(
     _seed_state(tmp_path)
     monkeypatch.setattr(executor_mod, "resolve_language_server_port", lambda _conv: _PORT)
     monkeypatch.setattr(executor_mod, "cancel_cascade_steps", lambda _port, _cid: False)
-    monkeypatch.setattr(
-        executor_mod, "interrupt_turn_via_tui", lambda _bridge, **_kwargs: False
-    )
+    monkeypatch.setattr(executor_mod, "interrupt_turn_via_tui", lambda _bridge, **_kwargs: False)
     result = asyncio.run(_executor(tmp_path).interrupt_session("main"))
     assert result is False
 
@@ -490,9 +488,7 @@ def test_interrupt_session_no_port_returns_false(
 
     monkeypatch.setattr(executor_mod, "resolve_language_server_port", lambda _conv: None)
     monkeypatch.setattr(executor_mod, "cancel_cascade_steps", _cancel)
-    monkeypatch.setattr(
-        executor_mod, "interrupt_turn_via_tui", lambda _bridge, **_kwargs: False
-    )
+    monkeypatch.setattr(executor_mod, "interrupt_turn_via_tui", lambda _bridge, **_kwargs: False)
     result = asyncio.run(_executor(tmp_path).interrupt_session("main"))
     assert result is False
     assert called["cancel"] is False
@@ -520,9 +516,7 @@ def test_interrupt_session_placeholder_returns_false(
 
     monkeypatch.setattr(executor_mod, "resolve_language_server_port", _resolve_port)
     monkeypatch.setattr(executor_mod, "cancel_cascade_steps", _cancel)
-    monkeypatch.setattr(
-        executor_mod, "interrupt_turn_via_tui", lambda _bridge, **_kwargs: False
-    )
+    monkeypatch.setattr(executor_mod, "interrupt_turn_via_tui", lambda _bridge, **_kwargs: False)
     result = asyncio.run(_executor(tmp_path).interrupt_session("main"))
     assert result is False
     assert called["cancel"] is False

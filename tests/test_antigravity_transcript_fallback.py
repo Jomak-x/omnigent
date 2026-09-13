@@ -863,9 +863,7 @@ async def test_confirmed_interrupt_without_native_stop_closes_and_allows_next_tu
         AntigravityNativeBridgeState(session_id="session-one", conversation_id=CONVERSATION_ID),
     )
     monkeypatch.setattr(executor_mod, "resolve_language_server_port", lambda _cid: None)
-    bridge.write_tmux_target(
-        bridge_dir, socket_path=tmp_path / "tmux.sock", tmux_target="main"
-    )
+    bridge.write_tmux_target(bridge_dir, socket_path=tmp_path / "tmux.sock", tmux_target="main")
     history = (
         "> Explain esc to cancel and ? for shortcuts\n"
         "The answer quotes esc to cancel and ? for shortcuts.\n"

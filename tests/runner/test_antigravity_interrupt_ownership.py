@@ -34,9 +34,7 @@ def _label_client(conv_id: str, bridge_id: str) -> NullServerClient:
                             ANTIGRAVITY_NATIVE_BRIDGE_ID_LABEL_KEY,
                         )
 
-                        return {
-                            "labels": {ANTIGRAVITY_NATIVE_BRIDGE_ID_LABEL_KEY: bridge_id}
-                        }
+                        return {"labels": {ANTIGRAVITY_NATIVE_BRIDGE_ID_LABEL_KEY: bridge_id}}
 
                 return _Labels()
             return await super().get(url, **kwargs)
@@ -112,7 +110,7 @@ async def test_event_does_not_escape_or_record_after_discovery_rotates_owner(
                 conversation_id="replacement-cascade",
             ),
         )
-        return None
+        return
 
     monkeypatch.setattr(executor, "turn_is_idle_via_tui", lambda _bridge_dir: False)
     monkeypatch.setattr(executor, "resolve_language_server_port", _discover)
@@ -139,9 +137,7 @@ async def test_event_does_not_escape_or_record_after_discovery_rotates_owner(
             socket_path=tmp_path / "tmux.sock",
             tmux_target="main",
         )
-        response = await client.post(
-            f"/v1/sessions/{conv_id}/events", json={"type": "interrupt"}
-        )
+        response = await client.post(f"/v1/sessions/{conv_id}/events", json={"type": "interrupt"})
 
     assert response.status_code == 204, response.text
     assert sent == []
@@ -167,7 +163,7 @@ async def test_event_does_not_escape_when_transcript_binding_rotates_before_stat
 
     def _discover(_cascade_id: str) -> None:
         _bind_transcript(bridge.bridge_dir_for_bridge_id(bridge_id), replacement_cascade)
-        return None
+        return
 
     monkeypatch.setattr(executor, "turn_is_idle_via_tui", lambda _bridge_dir: False)
     monkeypatch.setattr(executor, "resolve_language_server_port", _discover)
@@ -195,9 +191,7 @@ async def test_event_does_not_escape_when_transcript_binding_rotates_before_stat
             socket_path=tmp_path / "tmux.sock",
             tmux_target="main",
         )
-        response = await client.post(
-            f"/v1/sessions/{conv_id}/events", json={"type": "interrupt"}
-        )
+        response = await client.post(f"/v1/sessions/{conv_id}/events", json={"type": "interrupt"})
 
     assert response.status_code == 503, response.text
     assert sent == []
@@ -258,9 +252,7 @@ async def test_event_does_not_record_replacement_after_idle_confirmation_rotates
             socket_path=tmp_path / "tmux.sock",
             tmux_target="main",
         )
-        response = await client.post(
-            f"/v1/sessions/{conv_id}/events", json={"type": "interrupt"}
-        )
+        response = await client.post(f"/v1/sessions/{conv_id}/events", json={"type": "interrupt"})
 
     assert response.status_code == 204, response.text
     assert sent == [(str(tmp_path / "tmux.sock"), "send-keys", "-t", "main", "Escape")]
@@ -312,9 +304,7 @@ async def test_event_allows_first_turn_placeholder_to_bind_same_session_cascade(
             socket_path=tmp_path / "tmux.sock",
             tmux_target="main",
         )
-        response = await client.post(
-            f"/v1/sessions/{conv_id}/events", json={"type": "interrupt"}
-        )
+        response = await client.post(f"/v1/sessions/{conv_id}/events", json={"type": "interrupt"})
 
     assert response.status_code == 204, response.text
     assert sent == [(str(tmp_path / "tmux.sock"), "send-keys", "-t", "main", "Escape")]

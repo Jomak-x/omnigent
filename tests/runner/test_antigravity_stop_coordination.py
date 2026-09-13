@@ -177,9 +177,7 @@ async def test_stop_failure_keeps_child_pending_until_live_harness_confirms(
                     "type": "external_session_status",
                     "data": {"status": recovery, "output": "native result"},
                 }
-            confirmed = await client.post(
-                f"/v1/sessions/{child_id}/events", json=completion_body
-            )
+            confirmed = await client.post(f"/v1/sessions/{child_id}/events", json=completion_body)
 
             assert confirmed.status_code == 204, confirmed.text
             await _wait_until(lambda: bool(harness_client.posted_bodies))
@@ -214,11 +212,14 @@ async def test_stop_failure_keeps_child_pending_until_live_harness_confirms(
     ]
     assert "buffered follow-up" in dispatched_texts
     assert "fresh message" in dispatched_texts
-    assert delivered["status"] == {
-        "retry": "cancelled",
-        "idle": "completed",
-        "failed": "failed",
-    }[recovery]
+    assert (
+        delivered["status"]
+        == {
+            "retry": "cancelled",
+            "idle": "completed",
+            "failed": "failed",
+        }[recovery]
+    )
     assert any(
         url == f"/v1/sessions/{parent_id}/events" and payload.get("type") == "message"
         for url, payload in server_client.posts
@@ -276,9 +277,7 @@ async def test_cancelled_native_status_and_interrupt_wake_parent_once(
                 f"/v1/sessions/{child_id}/events", json={"type": "interrupt"}
             )
             assert stopped.status_code == 204, stopped.text
-            observed = await client.post(
-                f"/v1/sessions/{child_id}/events", json=terminal_body
-            )
+            observed = await client.post(f"/v1/sessions/{child_id}/events", json=terminal_body)
             assert observed.status_code == 204, observed.text
             await _wait_until(lambda: not parent_inbox.empty())
             assert parent_inbox.get_nowait()["status"] == "cancelled"
@@ -320,9 +319,7 @@ async def test_stop_waits_for_retained_adapter_injection_before_native_ack(
             session_id=child_id, conversation_id="agy_conv_placeholder"
         ),
     )
-    bridge.write_tmux_target(
-        bridge_dir, socket_path=tmp_path / "tmux.sock", tmux_target="main"
-    )
+    bridge.write_tmux_target(bridge_dir, socket_path=tmp_path / "tmux.sock", tmux_target="main")
     retry_started = asyncio.Event()
     release_retry = threading.Event()
     native_active = threading.Event()
@@ -380,9 +377,7 @@ async def test_stop_waits_for_retained_adapter_injection_before_native_ack(
             super().__init__([])
             self.interrupt_posts = 0
 
-        async def post(
-            self, url: str, *, json: dict[str, Any], timeout: Any = None
-        ) -> Response:
+        async def post(self, url: str, *, json: dict[str, Any], timeout: Any = None) -> Response:
             del url, timeout
             self.patched_events.append(json)
             if json.get("type") == "interrupt":
@@ -483,13 +478,9 @@ async def test_cancelled_stop_caller_retains_native_cancellation_before_later_tu
     bridge_dir = bridge.bridge_dir_for_bridge_id(child_id)
     bridge.write_bridge_state(
         bridge_dir,
-        bridge.AntigravityNativeBridgeState(
-            session_id=child_id, conversation_id=cascade_id
-        ),
+        bridge.AntigravityNativeBridgeState(session_id=child_id, conversation_id=cascade_id),
     )
-    bridge.write_tmux_target(
-        bridge_dir, socket_path=tmp_path / "tmux.sock", tmux_target="main"
-    )
+    bridge.write_tmux_target(bridge_dir, socket_path=tmp_path / "tmux.sock", tmux_target="main")
     worker_started = asyncio.Event()
     release_worker = threading.Event()
     boundary_started = asyncio.Event()
@@ -635,13 +626,9 @@ async def test_history_loading_message_waits_for_antigravity_stop_boundary(
     bridge_dir = bridge.bridge_dir_for_bridge_id(session_id)
     bridge.write_bridge_state(
         bridge_dir,
-        bridge.AntigravityNativeBridgeState(
-            session_id=session_id, conversation_id=cascade_id
-        ),
+        bridge.AntigravityNativeBridgeState(session_id=session_id, conversation_id=cascade_id),
     )
-    bridge.write_tmux_target(
-        bridge_dir, socket_path=tmp_path / "tmux.sock", tmux_target="main"
-    )
+    bridge.write_tmux_target(bridge_dir, socket_path=tmp_path / "tmux.sock", tmux_target="main")
 
     worker_started = asyncio.Event()
     release_worker = threading.Event()
@@ -684,10 +671,10 @@ async def test_history_loading_message_waits_for_antigravity_stop_boundary(
 
         async def get(self, url: str, **kwargs: Any) -> NullServerClient._Response:
             params = kwargs.get("params")
-            if (
-                url == f"/v1/sessions/{session_id}/items"
-                and params == {"limit": "100", "order": "asc"}
-            ):
+            if url == f"/v1/sessions/{session_id}/items" and params == {
+                "limit": "100",
+                "order": "asc",
+            }:
                 self.history_requests += 1
                 self.history_started.set()
                 await self.release_history.wait()

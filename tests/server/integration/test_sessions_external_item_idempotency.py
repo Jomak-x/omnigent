@@ -339,9 +339,7 @@ async def test_antigravity_native_steering_does_not_consume_queued_web_input(
         source_id="agy-transcript:cascade:user:4:web",
     )
     unnamed_text = _content_to_text(unnamed_content, tmp_path / "bridge")
-    assert re.fullmatch(
-        r"\[Attached: .*/uploads/attachment_[0-9a-f]{8}\.txt\]", unnamed_text
-    )
+    assert re.fullmatch(r"\[Attached: .*/uploads/attachment_[0-9a-f]{8}\.txt\]", unnamed_text)
     await _post_item(
         client,
         session_id,

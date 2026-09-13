@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
 import json
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
@@ -178,6 +178,7 @@ async def test_antigravity_file_id_pending_input_uses_resolved_transport_content
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(handle_runner), base_url="http://runner"
     ) as runner_client:
+
         async def get_runner(*_: Any, **__: Any) -> httpx.AsyncClient:
             return runner_client
 
@@ -231,7 +232,7 @@ async def test_antigravity_file_id_pending_input_uses_resolved_transport_content
             f"/v1/sessions/{session_id}/items",
             headers={"X-Forwarded-Email": _AUTHOR},
         )
-        ).json()["data"]
+    ).json()["data"]
     items = [item for item in items if item["type"] == "message"]
     assert len(items) == 2
     assert items[0]["id"] == persisted["item_id"]

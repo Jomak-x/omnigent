@@ -130,9 +130,7 @@ async def test_events_cancel_antigravity_native_without_inprocess_turn(
         "inject_user_message_via_tui",
         lambda bridge_dir, *, content: injected.append(content),
     )
-    monkeypatch.setattr(
-        agy_executor, "turn_is_idle_via_tui", lambda bridge_dir: pending_injection
-    )
+    monkeypatch.setattr(agy_executor, "turn_is_idle_via_tui", lambda bridge_dir: pending_injection)
     monkeypatch.setattr(agy_executor, "resolve_language_server_port", lambda cascade_id: 43210)
     monkeypatch.setattr(
         agy_executor,
