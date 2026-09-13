@@ -64,12 +64,14 @@ class _EventRecordingServerClient(NullServerClient):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("event_type", ["interrupt", "stop_session"])
+@pytest.mark.parametrize("pending_injection", [False, True])
 async def test_events_cancel_antigravity_native_without_inprocess_turn(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     event_type: str,
+    pending_injection: bool,
 ) -> None:
-    """A native turn remains cancellable after the TUI injection task exits."""
+    """Stop cancels a pending injection and still reaches active native generation."""
     from omnigent.harnesses.antigravity_native import bridge as agy_bridge
     from omnigent.inner import antigravity_native_executor as agy_executor
 
@@ -101,12 +103,30 @@ async def test_events_cancel_antigravity_native_without_inprocess_turn(
     async def _resolver(agent_id: str, session_id: str | None = None) -> AgentSpec:
         return spec
 
+    release_injection = asyncio.Event()
+
+    class _InterruptHarnessClient(_ScriptedHarnessClient):
+        async def post(self, url: str, **kwargs: Any) -> Any:
+            if kwargs.get("json", {}).get("type") == "interrupt":
+                release_injection.set()
+                await asyncio.sleep(0)
+            return await super().post(url, **kwargs)
+
     app = create_runner_app(
-        process_manager=_FakeProcessManager(_ScriptedHarnessClient([])),  # type: ignore[arg-type]
+        process_manager=_FakeProcessManager(_InterruptHarnessClient([])),  # type: ignore[arg-type]
         spec_resolver=_resolver,
         server_client=_LabelServerClient(),  # type: ignore[arg-type]
     )
     calls: list[tuple[int, str]] = []
+    injected: list[str] = []
+    monkeypatch.setattr(
+        agy_executor,
+        "inject_user_message_via_tui",
+        lambda bridge_dir, *, content: injected.append(content),
+    )
+    monkeypatch.setattr(
+        agy_executor, "turn_is_idle_via_tui", lambda bridge_dir: pending_injection
+    )
     monkeypatch.setattr(agy_executor, "resolve_language_server_port", lambda cascade_id: 43210)
     monkeypatch.setattr(
         agy_executor,
@@ -134,10 +154,35 @@ async def test_events_cancel_antigravity_native_without_inprocess_turn(
         )
         assert not app.state.active_turns.get(conv_id)
 
-        response = await client.post(f"/v1/sessions/{conv_id}/events", json={"type": event_type})
+        task: asyncio.Task[None] | None = None
+        if pending_injection:
+            executor = agy_executor.AntigravityNativeExecutor(bridge_dir=bridge_dir)
+            injection_pending = asyncio.Event()
+
+            async def _pending_turn() -> None:
+                injection_pending.set()
+                await release_injection.wait()
+                await executor.enqueue_session_message("main", "do not inject after Stop")
+
+            task = asyncio.create_task(_pending_turn())
+            app.state.active_turns[conv_id] = task
+            await injection_pending.wait()
+
+        try:
+            response = await client.post(
+                f"/v1/sessions/{conv_id}/events", json={"type": event_type}
+            )
+        finally:
+            release_injection.set()
+            if task is not None:
+                await asyncio.gather(task, return_exceptions=True)
+        if task is not None:
+            assert task.cancelled()
+            assert conv_id not in app.state.active_turns
 
     assert response.status_code == 204, response.text
-    assert calls == [(43210, "agy-cascade-123")]
+    assert calls == ([] if pending_injection else [(43210, "agy-cascade-123")])
+    assert injected == []
 
 
 class _RecordingCodexAppServerClient:

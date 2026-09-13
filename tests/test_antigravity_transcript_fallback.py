@@ -523,6 +523,78 @@ async def test_transcript_retries_failed_post_before_advancing_turn(
 
 
 @pytest.mark.asyncio
+async def test_transcript_delivers_pending_turn_before_clear_rotation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bridge_dir = tmp_path / "bridge"
+    transcript_path, cache = _session_files(bridge_dir)
+    transcript_path.write_text(
+        _step(0, "USER_EXPLICIT", "USER_INPUT", "<USER_REQUEST>old user</USER_REQUEST>")
+        + _step(1, "MODEL", "PLANNER_RESPONSE", "old answer")
+    )
+    record_stop_event(bridge_dir, {"conversationId": CONVERSATION_ID, "fullyIdle": True})
+    new_transcript = (
+        bridge_dir
+        / "agy-home"
+        / ".gemini"
+        / "antigravity-cli"
+        / "brain"
+        / OTHER_ID
+        / ".system_generated"
+        / "logs"
+        / "transcript_full.jsonl"
+    )
+    new_transcript.parent.mkdir(parents=True)
+    new_transcript.touch()
+    accepted: list[reader.OutboundEvent] = []
+    post_attempts = 0
+    user_attempts = 0
+
+    async def post(_client: object, _session_id: str, event: reader.OutboundEvent) -> bool:
+        nonlocal post_attempts, user_attempts
+        post_attempts += 1
+        if event.event_type == "external_conversation_item":
+            text = event.data["item_data"]["content"][0]["text"]
+            if text == "old user":
+                user_attempts += 1
+                if user_attempts == 1:
+                    cache.write_text(json.dumps({"/scratch": OTHER_ID}))
+                if user_attempts < 3:
+                    return False
+        accepted.append(event)
+        return True
+
+    monkeypatch.setattr(reader, "_post_event", post)
+    monkeypatch.setattr(reader, "_sleep", lambda _duration: _noop())
+    committed_turns: list[int] = []
+    polls = 0
+
+    def stop() -> bool:
+        nonlocal polls
+        polls += 1
+        return polls > 3
+
+    result = await reader._supervise_transcript(
+        bridge_dir,
+        transcript.TranscriptBinding(CONVERSATION_ID, transcript_path),
+        "session-one",
+        client=object(),  # type: ignore[arg-type]
+        poll_interval_s=0,
+        stop=stop,
+        committed_steps_out=committed_turns,
+    )
+    assert result == OTHER_ID
+    assert user_attempts == 3
+    assert post_attempts == 6
+    assert committed_turns == [1]
+    assert [
+        event.data["item_data"]["content"][0]["text"]
+        for event in accepted
+        if event.event_type == "external_conversation_item"
+    ] == ["old user", "old answer"]
+
+
+@pytest.mark.asyncio
 async def test_failed_stop_exposes_safe_error_output(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -633,9 +705,25 @@ async def test_confirmed_interrupt_without_native_stop_closes_and_allows_next_tu
         AntigravityNativeBridgeState(session_id="session-one", conversation_id=CONVERSATION_ID),
     )
     monkeypatch.setattr(executor_mod, "resolve_language_server_port", lambda _cid: None)
-    monkeypatch.setattr(executor_mod, "interrupt_turn_via_tui", lambda _bridge: True)
-    monkeypatch.setattr(executor_mod, "wait_for_turn_idle_via_tui", lambda _bridge: True)
+    bridge.write_tmux_target(
+        bridge_dir, socket_path=tmp_path / "tmux.sock", tmux_target="main"
+    )
+    history = (
+        "> Explain esc to cancel and ? for shortcuts\n"
+        "The answer quotes esc to cancel and ? for shortcuts.\n"
+    )
+    pane = [history + "esc to cancel\n"]
+    sent: list[tuple[str, ...]] = []
+
+    def cancel(*args: str) -> None:
+        sent.append(args)
+        pane[0] = history + "? for shortcuts\n"
+
+    monkeypatch.setattr(bridge, "_session_alive", lambda *_args: True)
+    monkeypatch.setattr(bridge, "_capture_pane", lambda *_args: pane[0])
+    monkeypatch.setattr(bridge, "_run_tmux", cancel)
     assert await executor_mod.interrupt_bridge_turn(bridge_dir, expected_session_id="session-one")
+    assert sent == [(str(tmp_path / "tmux.sock"), "send-keys", "-t", "main", "Escape")]
     marker = json.loads((bridge_dir / STOP_EVENTS_FILE).read_text())
     assert marker["cancelled"] is True
     assert marker["transcript_boundary"][2] == transcript_path.stat().st_size

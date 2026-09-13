@@ -14,6 +14,7 @@ wiring — what text it delivers and how it maps success/failure to events.
 from __future__ import annotations
 
 import asyncio
+import threading
 from pathlib import Path
 
 import pytest
@@ -574,6 +575,48 @@ def test_interrupt_bridge_turn_already_idle_is_idempotent(
     assert not asyncio.run(
         executor_mod.interrupt_bridge_turn(tmp_path, expected_session_id="other_session")
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_delivery", [False, True])
+async def test_interrupt_waits_for_inflight_tui_injection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cancel_delivery: bool
+) -> None:
+    _seed_state(tmp_path)
+    executor = _executor(tmp_path)
+    loop = asyncio.get_running_loop()
+    injection_started = asyncio.Event()
+    release_injection = threading.Event()
+    actions: list[str] = []
+
+    def _inject(_bridge: Path, *, content: str) -> None:
+        loop.call_soon_threadsafe(injection_started.set)
+        if not release_injection.wait(timeout=5):
+            raise RuntimeError("test injection was not released")
+        actions.append("injected")
+
+    async def _interrupt(_bridge: Path, *, expected_session_id: str | None) -> bool:
+        actions.append("cancelled")
+        return True
+
+    monkeypatch.setattr(executor_mod, "inject_user_message_via_tui", _inject)
+    monkeypatch.setattr(executor_mod, "interrupt_bridge_turn", _interrupt)
+    delivery = asyncio.create_task(executor.enqueue_session_message("main", "hello"))
+    await asyncio.wait_for(injection_started.wait(), timeout=5)
+    if cancel_delivery:
+        delivery.cancel()
+    interruption = asyncio.create_task(executor.interrupt_session("main"))
+    try:
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert not interruption.done()
+        assert actions == []
+    finally:
+        release_injection.set()
+        await asyncio.gather(delivery, return_exceptions=True)
+        await interruption
+    assert actions == ["injected", "cancelled"]
+    assert delivery.cancelled() is cancel_delivery
 
 
 # ---------------------------------------------------------------------------

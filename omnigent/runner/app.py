@@ -6955,6 +6955,11 @@ def create_runner_app(
             _sweep_dead_turn_slot(conv_id, target)
             return
         _interrupted_sessions.add(conv_id)
+        if _session_harness_name(conv_id) == "antigravity-native":
+            if isinstance(target, asyncio.Task):
+                await _cancel_active_turn(conv_id, expected_task=target)
+            await _forward_harness_interrupt(conv_id)
+            return
         await _forward_harness_interrupt(conv_id)
         # Floor: force-cancel the runner Task when we own one. In stream mode
         # there is no Task here — ``_resync_turn_state`` owns the sentinel pop,
@@ -9006,6 +9011,8 @@ def create_runner_app(
 
         if body_type == "interrupt":
             _harness = _session_harness_name(conversation_id)
+            if _harness == "antigravity-native":
+                await _cancel_inprocess_turn(conversation_id)
             _interrupt_resp = await _native_interrupt_runner.interrupt(_harness, conversation_id)
             if _interrupt_resp is not None:
                 return _interrupt_resp
@@ -9064,6 +9071,8 @@ def create_runner_app(
 
         if body_type == "stop_session":
             _harness = _session_harness_name(conversation_id)
+            if _harness == "antigravity-native":
+                await _cancel_inprocess_turn(conversation_id)
             _stop_resp = await _native_interrupt_runner.stop(_harness, conversation_id)
             if _stop_resp is not None:
                 return _stop_resp

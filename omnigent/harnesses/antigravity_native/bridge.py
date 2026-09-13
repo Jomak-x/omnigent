@@ -1797,6 +1797,20 @@ def send_interaction_keys_via_tui(
     _run_tmux(socket_path, "send-keys", "-t", tmux_target, *keys)
 
 
+def _agy_footer_state(pane: str) -> str | None:
+    """Classify agy's state from its final non-empty footer line."""
+    for line in reversed(pane.splitlines()):
+        footer = line.strip()
+        if not footer:
+            continue
+        if footer == _AGY_ACTIVE_MARKER:
+            return "active"
+        if footer == _AGY_IDLE_MARKER:
+            return "idle"
+        return None
+    return None
+
+
 def interrupt_turn_via_tui(bridge_dir: Path) -> bool:
     """Send agy's visible cancel key only while its TUI shows an active turn."""
     info = read_tmux_info(bridge_dir)
@@ -1806,7 +1820,7 @@ def interrupt_turn_via_tui(bridge_dir: Path) -> bool:
     tmux_target = info["tmux_target"]
     if not _session_alive(socket_path, tmux_target):
         return False
-    if _AGY_ACTIVE_MARKER not in _capture_pane(socket_path, tmux_target):
+    if _agy_footer_state(_capture_pane(socket_path, tmux_target)) != "active":
         return False
     _run_tmux(socket_path, "send-keys", "-t", tmux_target, "Escape")
     return True
@@ -1822,7 +1836,7 @@ def turn_is_idle_via_tui(bridge_dir: Path) -> bool:
     if not _session_alive(socket_path, tmux_target):
         return False
     pane = _capture_pane(socket_path, tmux_target)
-    return _AGY_IDLE_MARKER in pane and _AGY_ACTIVE_MARKER not in pane
+    return _agy_footer_state(pane) == "idle"
 
 
 def wait_for_turn_idle_via_tui(bridge_dir: Path, *, timeout_s: float = 5.0) -> bool:
@@ -1837,7 +1851,7 @@ def wait_for_turn_idle_via_tui(bridge_dir: Path, *, timeout_s: float = 5.0) -> b
         if not _session_alive(socket_path, tmux_target):
             return False
         pane = _capture_pane(socket_path, tmux_target)
-        if _AGY_IDLE_MARKER in pane and _AGY_ACTIVE_MARKER not in pane:
+        if _agy_footer_state(pane) == "idle":
             return True
         time.sleep(_TMUX_POLL_INTERVAL_S)
     return False

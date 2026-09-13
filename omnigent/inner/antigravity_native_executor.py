@@ -172,9 +172,10 @@ class AntigravityNativeExecutor(Executor):
             ``False`` when the bridge is inactive or neither transport is ready.
         """
         del session_key
-        return await interrupt_bridge_turn(
-            self._bridge_dir, expected_session_id=self._request_session_id
-        )
+        async with self._send_lock:
+            return await interrupt_bridge_turn(
+                self._bridge_dir, expected_session_id=self._request_session_id
+            )
 
     async def run_turn(
         self,
@@ -270,11 +271,18 @@ class AntigravityNativeExecutor(Executor):
             if not _session_is_active(state.session_id, self._request_session_id):
                 return "Antigravity native session is no longer active"
             try:
-                await asyncio.to_thread(
-                    inject_user_message_via_tui,
-                    self._bridge_dir,
-                    content=text,
+                injection = asyncio.create_task(
+                    asyncio.to_thread(
+                        inject_user_message_via_tui,
+                        self._bridge_dir,
+                        content=text,
+                    )
                 )
+                try:
+                    await asyncio.shield(injection)
+                except asyncio.CancelledError:
+                    await injection
+                    raise
             except RuntimeError as exc:
                 # The TUI pane is gone / never advertised / the submit never
                 # started a turn. Surface it so the UI can prompt a restart

@@ -678,6 +678,39 @@ def test_clear_bridge_state_removes_tmux_json(
     assert read_tmux_info(bridge_dir) is None
 
 
+def test_tui_footer_state_ignores_markers_quoted_in_prompt_and_answer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only the final footer controls idle detection and Escape eligibility."""
+    bridge_dir = tmp_path / "bridge"
+    write_tmux_target(bridge_dir, socket_path=tmp_path / "tmux.sock", tmux_target="main")
+    sent: list[tuple[str, ...]] = []
+    pane = {
+        "value": (
+            "> Explain the phrase esc to cancel\n"
+            "The completed answer quotes ? for shortcuts and esc to cancel.\n"
+            "? for shortcuts\n"
+        )
+    }
+    monkeypatch.setattr(_mod, "_session_alive", lambda *_args: True)
+    monkeypatch.setattr(_mod, "_capture_pane", lambda *_args: pane["value"])
+    monkeypatch.setattr(_mod, "_run_tmux", lambda *args: sent.append(args))
+
+    assert _mod.turn_is_idle_via_tui(bridge_dir)
+    assert _mod.wait_for_turn_idle_via_tui(bridge_dir, timeout_s=0.01)
+    assert not _mod.interrupt_turn_via_tui(bridge_dir)
+    assert sent == []
+
+    pane["value"] = (
+        "> Explain the idle footer ? for shortcuts\n"
+        "The active footer is esc to cancel.\n"
+        "esc to cancel\n"
+    )
+    assert not _mod.turn_is_idle_via_tui(bridge_dir)
+    assert _mod.interrupt_turn_via_tui(bridge_dir)
+    assert sent == [(str(tmp_path / "tmux.sock"), "send-keys", "-t", "main", "Escape")]
+
+
 # ---------------------------------------------------------------------------
 # Paste payload encoding + submit needle
 # ---------------------------------------------------------------------------

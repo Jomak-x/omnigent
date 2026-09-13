@@ -10,11 +10,13 @@ no-handler fall-through contract (opencode), and the 503 mapping.
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import pytest
 from fastapi.responses import Response
 
@@ -118,8 +120,11 @@ async def test_antigravity_interrupt_uses_active_bridge_label_and_wakes_parent(
     import omnigent.inner.antigravity_native_executor as executor
     from omnigent.runner.native import interrupt as interrupt_mod
 
-    async def _labels(*, server_client: Any, session_id: str) -> dict[str, str]:
+    async def _labels(
+        *, server_client: Any, session_id: str, raise_on_error: bool
+    ) -> dict[str, str]:
         assert session_id == "conv_agy"
+        assert raise_on_error
         return (
             {bridge.ANTIGRAVITY_NATIVE_BRIDGE_ID_LABEL_KEY: bridge_id}
             if bridge_id is not None
@@ -160,7 +165,9 @@ async def test_antigravity_interrupt_failure_does_not_acknowledge_active_turn(
 
     monkeypatch.setattr(bridge, "bridge_dir_for_bridge_id", lambda bridge_id: bridge_id)
 
-    async def _labels(*, server_client: Any, session_id: str) -> dict[str, str]:
+    async def _labels(
+        *, server_client: Any, session_id: str, raise_on_error: bool
+    ) -> dict[str, str]:
         return {}
 
     monkeypatch.setattr(interrupt_mod, "_session_labels_for_runner_spawn", _labels)
@@ -186,7 +193,9 @@ async def test_antigravity_interrupt_absent_bridge_is_idempotent(
     import omnigent.inner.antigravity_native_executor as executor
     from omnigent.runner.native import interrupt as interrupt_mod
 
-    async def _labels(*, server_client: Any, session_id: str) -> dict[str, str]:
+    async def _labels(
+        *, server_client: Any, session_id: str, raise_on_error: bool
+    ) -> dict[str, str]:
         return {}
 
     async def _cancel(bridge_dir: Any, *, expected_session_id: str | None) -> bool:
@@ -201,6 +210,49 @@ async def test_antigravity_interrupt_absent_bridge_is_idempotent(
     resp = await runner.stop("antigravity-native", "conv_agy")
 
     assert resp is not None and resp.status_code == 204
+    assert captured["wakes"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("event_type", ["interrupt", "stop"])
+@pytest.mark.parametrize("failure", ["timeout", "connection", "http", "json", "shape"])
+async def test_antigravity_label_lookup_failure_returns_sanitized_503(
+    monkeypatch: pytest.MonkeyPatch, event_type: str, failure: str
+) -> None:
+    import omnigent.harnesses.antigravity_native.bridge as bridge
+
+    requests: list[httpx.Request] = []
+
+    def _lookup(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if failure == "timeout":
+            raise httpx.ReadTimeout("private transport detail", request=request)
+        if failure == "connection":
+            raise httpx.ConnectError("private transport detail", request=request)
+        if failure == "http":
+            return httpx.Response(503, text="private transport detail")
+        if failure == "json":
+            return httpx.Response(200, text="private transport detail")
+        return httpx.Response(200, json={"labels": None})
+
+    monkeypatch.setattr(
+        bridge,
+        "bridge_dir_for_bridge_id",
+        lambda bridge_id: pytest.fail("failed lookup must not select a bridge"),
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(_lookup), base_url="http://server"
+    ) as server_client:
+        runner, captured = _make_runner(server_client=server_client)
+        response = await getattr(runner, event_type)("antigravity-native", "conv_agy")
+
+    assert len(requests) == 1
+    assert requests[0].url.path == "/v1/sessions/conv_agy/labels"
+    assert response is not None and response.status_code == 503
+    assert json.loads(bytes(response.body)) == {
+        "error": "antigravity_native_interrupt_failed",
+        "detail": "safe:antigravity-native interrupt",
+    }
     assert captured["wakes"] == []
 
 

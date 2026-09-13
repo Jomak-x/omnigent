@@ -498,16 +498,17 @@ class NativeInterruptRunner:
         )
         from omnigent.inner.antigravity_native_executor import interrupt_bridge_turn
 
-        labels = await _session_labels_for_runner_spawn(
-            server_client=self._server_client,
-            session_id=conv_id,
-        )
-        bridge_dir = bridge_dir_for_bridge_id(
-            labels.get(ANTIGRAVITY_NATIVE_BRIDGE_ID_LABEL_KEY) or conv_id
-        )
         try:
+            labels = await _session_labels_for_runner_spawn(
+                server_client=self._server_client,
+                session_id=conv_id,
+                raise_on_error=True,
+            )
+            bridge_dir = bridge_dir_for_bridge_id(
+                labels.get(ANTIGRAVITY_NATIVE_BRIDGE_ID_LABEL_KEY) or conv_id
+            )
             cancelled = await interrupt_bridge_turn(bridge_dir, expected_session_id=conv_id)
-        except (RuntimeError, OSError) as exc:
+        except (RuntimeError, OSError, httpx.HTTPError) as exc:
             return JSONResponse(
                 status_code=503,
                 content={

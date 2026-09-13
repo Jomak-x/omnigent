@@ -1047,6 +1047,7 @@ async def _supervise_transcript(
             current.conversation_id != binding.conversation_id
             and current.conversation_id not in skip_cascade_ids
             and not turn_active
+            and not pending_records
         ):
             if committed_steps_out is not None:
                 committed_steps_out.append(committed_turns)
