@@ -54,6 +54,13 @@ replacing `run.py` above and choosing fresh state and recording paths:
   rejected execution parameters and conflicting operations, and terminal-marker
   absence from application logs and the database. Add `--timeout-test` with new
   paths for the separate timeout/cleanup journey.
+- `run_antigravity.py` also requires the reviewed tmux path. Its disposable
+  `agy` fixture starts signed in for a preflight check, then simulates a signed
+  out interactive session. Entering `fixture-signin` marks the fixture signed in
+  while the CLI remains alive. The browser checks a rejected and a successful
+  verification, navigation banner, reload reattachment, subsequent preflight,
+  and cancellation. It does not run the real Antigravity CLI or authenticate a
+  vendor account.
 
 These runners stop their fixture processes when the journey finishes. No vendor
 login is attempted; recorded device codes and terminal prompts are fake.

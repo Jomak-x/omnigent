@@ -29,6 +29,7 @@ vi.mock("@/lib/providerSetupApi", () => ({
   setupOperationAttachUrl: vi.fn(() => "ws://example.test/attach"),
   fetchSetupOperation: vi.fn(),
   cancelSetupOperation: vi.fn(),
+  verifySetupOperation: vi.fn(),
 }));
 
 import * as providerSetupApi from "@/lib/providerSetupApi";
@@ -65,8 +66,8 @@ describe("ProviderSetupTerminal", () => {
 
     expect(screen.getByText("Connecting terminal…")).toHaveClass("z-20");
     expect(screen.getByText("Running")).toBeInTheDocument();
-    expect(screen.getByText(/Follow the command output/i)).toBeInTheDocument();
-    expect(screen.getByText(/a vendor redirect to localhost/i)).toBeInTheDocument();
+    expect(screen.getByText(/Complete the requested step/i)).toBeInTheDocument();
+    expect(screen.getByText("Sign-in help")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Cancel" })).toBeEnabled();
 
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
@@ -136,16 +137,86 @@ describe("ProviderSetupTerminal", () => {
       />,
     );
 
-    expect(
-      screen.getByText(
-        "The guided command exited. Review the local provider status below for any saved changes.",
-      ),
-    ).toBeInTheDocument();
-    await waitFor(() => expect(sessions).toHaveLength(1));
-    act(() => sessions[0].onState({ kind: "closed", code: 1000, reason: "" }));
+    expect(screen.getByText("Setup command completed.")).toBeInTheDocument();
+    expect(sessions).toHaveLength(0);
+    expect(screen.queryByRole("button", { name: "View output" })).toBeNull();
 
     expect(screen.queryByRole("button", { name: "Retry terminal" })).toBeNull();
-    expect(screen.queryByText(/Terminal bridge closed/i)).toBeNull();
     expect(onFinished).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the existing terminal session when completed output is collapsed and reopened", async () => {
+    const onOperationChange = vi.fn();
+    const view = render(
+      <ProviderSetupTerminal
+        hostId="host_a"
+        operation={runningOperation}
+        onOperationChange={onOperationChange}
+        onFinished={vi.fn()}
+      />,
+    );
+    await waitFor(() => expect(sessions).toHaveLength(1));
+
+    view.rerender(
+      <ProviderSetupTerminal
+        hostId="host_a"
+        operation={{ ...runningOperation, state: "succeeded", exit_code: 0 }}
+        onOperationChange={onOperationChange}
+        onFinished={vi.fn()}
+      />,
+    );
+
+    expect(await screen.findByText("Command output is hidden.")).toBeInTheDocument();
+    expect(sessions[0].dispose).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "View output" }));
+    expect(sessions).toHaveLength(1);
+  });
+
+  it("checks an Antigravity connection only when the operation allows verification", async () => {
+    const onOperationChange = vi.fn();
+    const verified = {
+      ...runningOperation,
+      action: "antigravity-login" as const,
+      state: "succeeded" as const,
+      exit_code: 0,
+    };
+    vi.mocked(providerSetupApi.verifySetupOperation).mockResolvedValue(verified);
+
+    render(
+      <ProviderSetupTerminal
+        hostId="host_a"
+        operation={{ ...runningOperation, action: "antigravity-login", can_verify: true }}
+        onOperationChange={onOperationChange}
+        onFinished={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Check connection" }));
+
+    await waitFor(() =>
+      expect(providerSetupApi.verifySetupOperation).toHaveBeenCalledWith("host_a", "op_123"),
+    );
+    expect(onOperationChange).toHaveBeenCalledWith(verified);
+  });
+
+  it("keeps a rejected connection check visible while setup continues", async () => {
+    vi.mocked(providerSetupApi.verifySetupOperation).mockRejectedValue(
+      Object.assign(new Error("Not connected"), { status: 409 }),
+    );
+
+    render(
+      <ProviderSetupTerminal
+        hostId="host_a"
+        operation={{ ...runningOperation, action: "antigravity-login", can_verify: true }}
+        onOperationChange={vi.fn()}
+        onFinished={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Check connection" }));
+
+    expect(
+      await screen.findByText("Connection not detected yet. Finish signing in, then check again."),
+    ).toBeInTheDocument();
   });
 });

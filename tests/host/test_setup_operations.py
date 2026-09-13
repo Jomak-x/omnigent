@@ -193,7 +193,10 @@ async def _wait_for_state(
 async def test_fixed_vendor_action_maps_to_host_owned_argv(
     action: str, executable: str, args: tuple[str, ...]
 ) -> None:
-    harness = _Harness()
+    if action == "antigravity-login":
+        harness = _Harness(verifier=lambda _action, _parameters: bool(harness.terminals))
+    else:
+        harness = _Harness()
     snapshot = await harness.manager.start({"action": action, "parameters": {}})
 
     plan = harness.terminals[0].plan
@@ -205,6 +208,7 @@ async def test_fixed_vendor_action_maps_to_host_owned_argv(
         "action": action,
         "exit_code": None,
         "error": None,
+        **({"can_verify": True} if action == "antigravity-login" else {}),
     }
 
     await harness.terminals[0].complete(0)
@@ -387,12 +391,289 @@ async def test_antigravity_login_resolves_supported_fallback_binary(
     manager = SetupOperationManager(
         terminal_factory=terminal_factory,
         executable_resolver=lambda name: "/fixture/bin/tmux" if name == "tmux" else None,
+        verifier=lambda _action, _parameters: False,
     )
 
     assert SetupOperationAction.ANTIGRAVITY_LOGIN in manager.supported_actions()
     snapshot = await manager.start({"action": "antigravity-login"})
     assert terminals[0].plan.executable == str(binary)
     await manager.cancel(snapshot.operation_id)
+
+
+def test_antigravity_verifier_uses_bounded_existing_cli_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import omnigent.onboarding.harness_install as harness_install
+
+    observed: list[tuple[str, float | None]] = []
+
+    def logged_in(key: str, timeout: float | None = None) -> bool:
+        observed.append((key, timeout))
+        return True
+
+    monkeypatch.setattr(harness_install, "harness_cli_logged_in", logged_in)
+    assert operations._verify_action(SetupOperationAction.ANTIGRAVITY_LOGIN, {})
+    assert observed == [
+        (harness_install.GEMINI_FAMILY, harness_install.READINESS_CLI_PROBE_TIMEOUT_S)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_antigravity_already_connected_finishes_without_terminal() -> None:
+    harness = _Harness(verifier=lambda _action, _parameters: True)
+
+    snapshot = await harness.manager.start({"action": "antigravity-login"})
+
+    assert snapshot.state == SetupOperationState.SUCCEEDED
+    assert snapshot.as_dict()["already_connected"] is True
+    assert "can_verify" not in snapshot.as_dict()
+    assert harness.terminals == []
+    assert harness.persisted == [SetupOperationAction.ANTIGRAVITY_LOGIN]
+    assert (await harness.manager.get(snapshot.operation_id)).state == (
+        SetupOperationState.SUCCEEDED
+    )
+
+
+@pytest.mark.asyncio
+async def test_antigravity_explicit_verification_keeps_unverified_process_running() -> None:
+    connected = False
+    probes = 0
+
+    def verifier(_action: SetupOperationAction, _parameters: Mapping[str, object]) -> bool:
+        nonlocal probes
+        probes += 1
+        return connected
+
+    harness = _Harness(verifier=verifier)
+    started = await harness.manager.start({"action": "antigravity-login"})
+    terminal = harness.terminals[0]
+    assert started.state == SetupOperationState.RUNNING
+    assert started.as_dict()["can_verify"] is True
+    assert "already_connected" not in started.as_dict()
+
+    with pytest.raises(SetupOperationError) as exc_info:
+        await harness.manager.verify(started.operation_id)
+    assert exc_info.value.code == "conflict"
+    assert (await harness.manager.get(started.operation_id)).state == SetupOperationState.RUNNING
+    assert terminal.closed == 0
+    assert harness.persisted == []
+
+    connected = True
+    verified = await harness.manager.verify(started.operation_id)
+    assert verified.state == SetupOperationState.SUCCEEDED
+    assert "can_verify" not in verified.as_dict()
+    assert terminal.closed == 1
+    assert harness.persisted == [SetupOperationAction.ANTIGRAVITY_LOGIN]
+    assert probes == 3
+    assert not harness.manager.has_active_operation()
+
+
+@pytest.mark.asyncio
+async def test_antigravity_verify_close_failure_is_retryable_without_false_success() -> None:
+    connected = False
+    harness = _Harness(verifier=lambda _action, _parameters: connected)
+    started = await harness.manager.start({"action": "antigravity-login"})
+    terminal = harness.terminals[0]
+    original_close = terminal.close
+    closes = 0
+
+    async def flaky_close() -> None:
+        nonlocal closes
+        closes += 1
+        if closes == 1:
+            raise RuntimeError("fixture-sensitive-terminal-output")
+        await original_close()
+
+    terminal.close = flaky_close  # type: ignore[method-assign]
+    connected = True
+    with pytest.raises(SetupOperationError) as exc_info:
+        await harness.manager.verify(started.operation_id)
+    assert exc_info.value.code == "verification_failed"
+    assert "fixture-sensitive" not in exc_info.value.message
+    retryable = await harness.manager.get(started.operation_id)
+    assert retryable.state == SetupOperationState.RUNNING
+    assert retryable.can_verify
+    assert harness.manager.has_active_operation()
+    assert not harness.manager._operations[started.operation_id].finishing
+    assert harness.persisted == []
+
+    verified = await harness.manager.verify(started.operation_id)
+    assert verified.state == SetupOperationState.SUCCEEDED
+    assert terminal.closed == 1
+    assert harness.persisted == [SetupOperationAction.ANTIGRAVITY_LOGIN]
+    assert not harness.manager.has_active_operation()
+
+
+@pytest.mark.asyncio
+async def test_antigravity_verify_rejects_concurrent_actions_during_terminal_close() -> None:
+    connected = False
+    harness = _Harness(verifier=lambda _action, _parameters: connected)
+    started = await harness.manager.start({"action": "antigravity-login"})
+    terminal = harness.terminals[0]
+    close_started = asyncio.Event()
+    release_close = asyncio.Event()
+    original_close = terminal.close
+
+    async def delayed_close() -> None:
+        close_started.set()
+        await release_close.wait()
+        await original_close()
+
+    terminal.close = delayed_close  # type: ignore[method-assign]
+    connected = True
+    verification = asyncio.create_task(harness.manager.verify(started.operation_id))
+    await asyncio.wait_for(close_started.wait(), timeout=1)
+    for request in (
+        harness.manager.verify(started.operation_id),
+        harness.manager.cancel(started.operation_id),
+        harness.manager.attach(started.operation_id, "fixture", lambda _event: _done()),
+    ):
+        with pytest.raises(SetupOperationError) as exc_info:
+            await request
+        assert exc_info.value.code == "conflict"
+    assert harness.persisted == []
+    release_close.set()
+    assert (await verification).state == SetupOperationState.SUCCEEDED
+    assert harness.persisted == [SetupOperationAction.ANTIGRAVITY_LOGIN]
+
+
+@pytest.mark.asyncio
+async def test_antigravity_verify_sanitizes_status_probe_exception() -> None:
+    probes = 0
+
+    def verifier(_action: SetupOperationAction, _parameters: Mapping[str, object]) -> bool:
+        nonlocal probes
+        probes += 1
+        if probes == 1:
+            return False
+        raise RuntimeError("fixture-sensitive-auth-status")
+
+    harness = _Harness(verifier=verifier)
+    started = await harness.manager.start({"action": "antigravity-login"})
+    with pytest.raises(SetupOperationError) as exc_info:
+        await harness.manager.verify(started.operation_id)
+    assert exc_info.value.code == "verification_failed"
+    assert "fixture-sensitive" not in exc_info.value.message
+    assert (await harness.manager.get(started.operation_id)).state == SetupOperationState.RUNNING
+    assert harness.terminals[0].closed == 0
+    await harness.manager.cancel(started.operation_id)
+
+
+@pytest.mark.asyncio
+async def test_antigravity_cancel_prevents_later_verification_probe() -> None:
+    probes = 0
+
+    def verifier(_action: SetupOperationAction, _parameters: Mapping[str, object]) -> bool:
+        nonlocal probes
+        probes += 1
+        return False
+
+    harness = _Harness(verifier=verifier)
+    started = await harness.manager.start({"action": "antigravity-login"})
+    cancelled = await harness.manager.cancel(started.operation_id)
+    verified = await harness.manager.verify(started.operation_id)
+
+    assert cancelled.state == verified.state == SetupOperationState.CANCELLED
+    assert probes == 1
+    assert harness.terminals[0].closed == 1
+    assert harness.persisted == []
+
+
+@pytest.mark.asyncio
+async def test_antigravity_preflight_serializes_concurrent_starts() -> None:
+    entered = threading.Event()
+    release = threading.Event()
+
+    def verifier(_action: SetupOperationAction, _parameters: Mapping[str, object]) -> bool:
+        entered.set()
+        release.wait(timeout=1)
+        return False
+
+    harness = _Harness(verifier=verifier)
+    first = asyncio.create_task(harness.manager.start({"action": "antigravity-login"}))
+    assert await asyncio.to_thread(entered.wait, 1)
+    second = asyncio.create_task(harness.manager.start({"action": "codex-login"}))
+    await asyncio.sleep(0)
+    assert harness.terminals == []
+    release.set()
+    started = await first
+    with pytest.raises(SetupOperationError) as exc_info:
+        await second
+    assert exc_info.value.code == "conflict"
+    assert len(harness.terminals) == 1
+    await harness.manager.cancel(started.operation_id)
+
+
+@pytest.mark.asyncio
+async def test_cancelled_preflight_keeps_guard_until_status_probe_exits() -> None:
+    entered = threading.Event()
+    release = threading.Event()
+
+    def verifier(_action: SetupOperationAction, _parameters: Mapping[str, object]) -> bool:
+        entered.set()
+        release.wait(timeout=1)
+        return False
+
+    harness = _Harness(verifier=verifier)
+    first = asyncio.create_task(harness.manager.start({"action": "antigravity-login"}))
+    assert await asyncio.to_thread(entered.wait, 1)
+    first.cancel()
+    second = asyncio.create_task(harness.manager.start({"action": "codex-login"}))
+    await asyncio.sleep(0)
+    assert harness.terminals == []
+
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    started = await second
+    assert started.state == SetupOperationState.RUNNING
+    assert len(harness.terminals) == 1
+    await harness.manager.cancel(started.operation_id)
+
+
+@pytest.mark.asyncio
+async def test_antigravity_exit_and_explicit_verify_persist_once() -> None:
+    monitor_entered = threading.Event()
+    release_monitor = threading.Event()
+    probes = 0
+
+    def verifier(_action: SetupOperationAction, _parameters: Mapping[str, object]) -> bool:
+        nonlocal probes
+        probes += 1
+        if probes == 1:
+            return False
+        if probes == 2:
+            monitor_entered.set()
+            release_monitor.wait(timeout=1)
+        return True
+
+    harness = _Harness(verifier=verifier)
+    started = await harness.manager.start({"action": "antigravity-login"})
+    await harness.terminals[0].complete(0)
+    assert await asyncio.to_thread(monitor_entered.wait, 1)
+
+    verification = asyncio.create_task(harness.manager.verify(started.operation_id))
+    for _ in range(100):
+        if (
+            await harness.manager.get(started.operation_id)
+        ).state == SetupOperationState.SUCCEEDED:
+            break
+        await asyncio.sleep(0.001)
+    release_monitor.set()
+    assert (await verification).state == SetupOperationState.SUCCEEDED
+    assert harness.persisted == [SetupOperationAction.ANTIGRAVITY_LOGIN]
+    assert harness.terminals[0].closed == 1
+
+
+@pytest.mark.asyncio
+async def test_other_guided_login_cannot_verify_while_running() -> None:
+    harness = _Harness()
+    started = await harness.manager.start({"action": "codex-login"})
+    with pytest.raises(SetupOperationError) as exc_info:
+        await harness.manager.verify(started.operation_id)
+    assert exc_info.value.code == "conflict"
+    assert "can_verify" not in started.as_dict()
+    await harness.manager.cancel(started.operation_id)
 
 
 @pytest.mark.asyncio

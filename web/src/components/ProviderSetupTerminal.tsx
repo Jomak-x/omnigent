@@ -17,6 +17,7 @@ import {
   fetchSetupOperation,
   setupOperationAttachUrl,
   type SetupOperation,
+  verifySetupOperation,
 } from "@/lib/providerSetupApi";
 
 /** Operation states where the setup process can still produce new output. */
@@ -74,11 +75,13 @@ function statusDetails(operation: SetupOperation): {
 function stateMessage(operation: SetupOperation): string {
   switch (operation.state) {
     case "pending":
-      return "The setup command is queued and has not started yet.";
+      return "Preparing the connection…";
     case "running":
-      return "Follow the command output below. This view updates while setup runs.";
+      return "Complete the requested step, then return here.";
     case "succeeded":
-      return "The guided command exited. Review the local provider status below for any saved changes.";
+      return operation.action === "antigravity-login"
+        ? "Connection confirmed."
+        : "Setup command completed.";
     case "failed":
       return operation.error
         ? "The setup command did not complete."
@@ -123,7 +126,11 @@ export function ProviderSetupTerminal({
   const [bridgeState, setBridgeState] = useState<ConnectionState>({ kind: "connecting" });
   const [attachAttempt, setAttachAttempt] = useState(0);
   const [cancelPending, setCancelPending] = useState(false);
+  const [verifyPending, setVerifyPending] = useState(false);
+  const [verifyError, setVerifyError] = useState<string | null>(null);
   const [requestError, setRequestError] = useState<string | null>(null);
+  const [showOutput, setShowOutput] = useState(() => operation.state !== "succeeded");
+  const hasLiveOutputRef = useRef(isActive(operation));
   const sessionRef = useRef<TerminalSession | null>(null);
   const finishedOperationIdRef = useRef<string | null>(null);
   const onOperationChangeRef = useRef(onOperationChange);
@@ -145,7 +152,11 @@ export function ProviderSetupTerminal({
   const StatusIcon = details.icon;
 
   useEffect(() => {
-    if (!terminalNode) return;
+    if (operation.state === "succeeded") setShowOutput(false);
+  }, [operation.state]);
+
+  useEffect(() => {
+    if (!terminalNode || !hasLiveOutputRef.current) return;
 
     // Clear a previous xterm DOM tree before mounting a replacement. This is
     // needed when the user retries after a bridge error or opens another setup
@@ -238,6 +249,25 @@ export function ProviderSetupTerminal({
     setAttachAttempt((attempt) => attempt + 1);
   };
 
+  const verify = async () => {
+    setVerifyPending(true);
+    setVerifyError(null);
+    try {
+      const next = await verifySetupOperation(hostId, operationId);
+      onOperationChangeRef.current(next);
+      if (!isActive(next)) notifyFinished(next.operation_id);
+    } catch (error) {
+      const status = typeof error === "object" && error && "status" in error ? error.status : null;
+      setVerifyError(
+        status === 409
+          ? "Connection not detected yet. Finish signing in, then check again."
+          : errorMessage(error, "Couldn't check the connection."),
+      );
+    } finally {
+      setVerifyPending(false);
+    }
+  };
+
   const bridgeFailed = active && (bridgeState.kind === "error" || bridgeState.kind === "closed");
 
   return (
@@ -279,6 +309,19 @@ export function ProviderSetupTerminal({
             Cancel
           </Button>
         )}
+        {operation.can_verify === true && (
+          <Button
+            type="button"
+            size="xs"
+            variant="outline"
+            onClick={verify}
+            loading={verifyPending}
+            disabled={verifyPending || cancelPending}
+            componentId="provider-setup.verify"
+          >
+            Check connection
+          </Button>
+        )}
       </header>
 
       <div
@@ -287,44 +330,58 @@ export function ProviderSetupTerminal({
       >
         {stateMessage(operation)}
         {active && (
-          <p className="mt-1">
-            If this is a remote computer, a vendor redirect to localhost reaches the computer
-            running your browser, not the selected host. Use the vendor’s device-code or remote
-            sign-in option when available, or complete sign-in in a browser on the selected host.
-          </p>
+          <details className="mt-1 text-xs">
+            <summary className="cursor-pointer">Sign-in help</summary>
+            <p className="mt-1">
+              On a remote computer, a localhost redirect opens in this browser rather than on the
+              selected computer. Use device-code sign-in when available, or sign in in a browser on
+              that computer.
+            </p>
+          </details>
         )}
         {operation.error && <p className="mt-1 text-destructive">{operation.error}</p>}
+        {verifyError && <p className="mt-1 text-destructive">{verifyError}</p>}
         {requestError && <p className="mt-1 text-destructive">{requestError}</p>}
       </div>
 
-      <div className="relative h-72 bg-card p-1 sm:h-80">
-        <div ref={setTerminalNode} className="h-full w-full overflow-hidden" />
-        {active && bridgeState.kind === "connecting" && (
-          <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center bg-background/70 text-sm text-muted-foreground backdrop-blur-[1px]">
-            <Loader2Icon className="mr-2 size-4 animate-spin" aria-hidden="true" />
-            Connecting terminal…
-          </div>
-        )}
-        {bridgeFailed && (
-          <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-2 bg-background/85 px-4 text-center text-sm text-muted-foreground backdrop-blur-[1px]">
-            <span>
-              {bridgeState.kind === "closed"
-                ? `Terminal bridge closed${bridgeState.reason ? `: ${bridgeState.reason}` : "."}`
-                : "Terminal bridge could not connect."}
-            </span>
-            <Button
-              type="button"
-              size="xs"
-              variant="outline"
-              onClick={retryAttach}
-              componentId="provider-setup.retry-terminal"
-            >
-              <RotateCwIcon className="size-3" aria-hidden="true" />
-              Retry terminal
-            </Button>
-          </div>
-        )}
-      </div>
+      {hasLiveOutputRef.current && (
+        <div className={showOutput ? "relative h-56 bg-card p-1 sm:h-64" : "hidden"}>
+          <div ref={setTerminalNode} className="h-full w-full overflow-hidden" />
+          {active && bridgeState.kind === "connecting" && (
+            <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center bg-background/70 text-sm text-muted-foreground backdrop-blur-[1px]">
+              <Loader2Icon className="mr-2 size-4 animate-spin" aria-hidden="true" />
+              Connecting terminal…
+            </div>
+          )}
+          {bridgeFailed && (
+            <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-2 bg-background/85 px-4 text-center text-sm text-muted-foreground backdrop-blur-[1px]">
+              <span>
+                {bridgeState.kind === "closed"
+                  ? `Terminal bridge closed${bridgeState.reason ? `: ${bridgeState.reason}` : "."}`
+                  : "Terminal bridge could not connect."}
+              </span>
+              <Button
+                type="button"
+                size="xs"
+                variant="outline"
+                onClick={retryAttach}
+                componentId="provider-setup.retry-terminal"
+              >
+                <RotateCwIcon className="size-3" aria-hidden="true" />
+                Retry terminal
+              </Button>
+            </div>
+          )}
+        </div>
+      )}
+      {!showOutput && hasLiveOutputRef.current && (
+        <div className="flex items-center justify-between gap-3 px-3 py-2 text-xs text-muted-foreground">
+          <span>Command output is hidden.</span>
+          <Button type="button" size="xs" variant="ghost" onClick={() => setShowOutput(true)}>
+            View output
+          </Button>
+        </div>
+      )}
     </section>
   );
 }

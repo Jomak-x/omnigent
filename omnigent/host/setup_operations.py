@@ -125,15 +125,22 @@ class SetupOperationSnapshot:
     action: SetupOperationAction
     exit_code: int | None = None
     error: str | None = None
+    already_connected: bool = False
+    can_verify: bool = False
 
     def as_dict(self) -> dict[str, object]:
-        return {
+        result: dict[str, object] = {
             "operation_id": self.operation_id,
             "state": self.state.value,
             "action": self.action.value,
             "exit_code": self.exit_code,
             "error": self.error,
         }
+        if self.already_connected:
+            result["already_connected"] = True
+        if self.can_verify:
+            result["can_verify"] = True
+        return result
 
 
 TerminalEventSender = Callable[[dict[str, object]], Awaitable[None]]
@@ -174,7 +181,7 @@ class _Operation:
     operation_id: str
     action: SetupOperationAction
     parameters: dict[str, object]
-    terminal: _ManagedTerminal
+    terminal: _ManagedTerminal | None
     state: SetupOperationState = SetupOperationState.PENDING
     exit_code: int | None = None
     error: str | None = None
@@ -184,6 +191,7 @@ class _Operation:
     attachments: dict[str, _TerminalAttachment] = field(default_factory=dict)
     close_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     terminal_closed: bool = False
+    already_connected: bool = False
 
     def snapshot(self) -> SetupOperationSnapshot:
         return SetupOperationSnapshot(
@@ -192,6 +200,11 @@ class _Operation:
             action=self.action,
             exit_code=self.exit_code,
             error=self.error,
+            already_connected=self.already_connected,
+            can_verify=(
+                self.state == SetupOperationState.RUNNING
+                and self.action == SetupOperationAction.ANTIGRAVITY_LOGIN
+            ),
         )
 
 
@@ -360,7 +373,6 @@ class SetupOperationManager:
         if not isinstance(request, SetupOperationRequest):
             request = SetupOperationRequest.from_dict(request)
         parameters = _validated_parameters(request)
-        plan = self._command_plan(request.action, parameters)
         operation_id = uuid4().hex
 
         async with self._lock:
@@ -371,6 +383,26 @@ class SetupOperationManager:
                 raise SetupOperationError(
                     "conflict", "Another setup operation is already running."
                 )
+            if request.action == SetupOperationAction.ANTIGRAVITY_LOGIN:
+                try:
+                    connected = await self._check_verifier(request.action, parameters)
+                except Exception:  # noqa: BLE001 - vendor status may include auth details
+                    connected = False
+                if connected:
+                    operation = _Operation(operation_id, request.action, parameters, None)
+                    self._operations[operation_id] = operation
+                    try:
+                        self._post_success(request.action, parameters)
+                    except Exception:  # noqa: BLE001 - persistence errors may contain secrets
+                        operation.state = SetupOperationState.FAILED
+                        operation.error = (
+                            "Setup was verified, but Omnigent could not save the connection."
+                        )
+                    else:
+                        operation.state = SetupOperationState.SUCCEEDED
+                        operation.already_connected = True
+                    return operation.snapshot()
+            plan = self._command_plan(request.action, parameters)
             terminal = self._terminal_factory(plan, operation_id)
             operation = _Operation(operation_id, request.action, parameters, terminal)
             self._operations[operation_id] = operation
@@ -398,9 +430,87 @@ class SetupOperationManager:
         async with self._lock:
             return self._require(operation_id).snapshot()
 
+    async def verify(self, operation_id: str) -> SetupOperationSnapshot:
+        """Finish an interactive Antigravity login after its host status is ready."""
+        async with self._lock:
+            operation = self._require(operation_id)
+            if operation.finishing:
+                raise SetupOperationError("conflict", "The setup operation is finishing.")
+            if operation.state in _TERMINAL_STATES:
+                return operation.snapshot()
+            if operation.action != SetupOperationAction.ANTIGRAVITY_LOGIN:
+                raise SetupOperationError(
+                    "conflict", "This setup operation cannot be verified here."
+                )
+            try:
+                verified = await self._check_verifier(operation.action, operation.parameters)
+            except Exception as exc:  # Vendor status may include auth details.
+                raise SetupOperationError(
+                    "verification_failed",
+                    "Could not check the sign-in status. Retry verification.",
+                ) from exc
+            if not verified:
+                raise SetupOperationError(
+                    "conflict",
+                    "Sign-in is not verified yet. Complete it in the browser and retry.",
+                )
+            operation.finishing = True
+            tasks = self._cancel_background_tasks(operation)
+            attachments = list(operation.attachments.values())
+            operation.attachments.clear()
+        closed = False
+        close_error: Exception | None = None
+        try:
+            await _disconnect_attachments(attachments)
+            await self._close_terminal(operation)
+            closed = True
+        except Exception as exc:  # noqa: BLE001 - cleanup errors may contain auth output
+            close_error = exc
+        finally:
+            try:
+                await _join_tasks(tasks, timeout_seconds=None)
+            finally:
+                async with self._lock:
+                    if closed and operation.state == SetupOperationState.RUNNING:
+                        try:
+                            self._post_success(operation.action, operation.parameters)
+                        except Exception:  # noqa: BLE001 - persistence may contain secrets
+                            operation.state = SetupOperationState.FAILED
+                            operation.error = (
+                                "Setup was verified, but Omnigent could not save the connection."
+                            )
+                        else:
+                            operation.state = SetupOperationState.SUCCEEDED
+                    if operation.state != SetupOperationState.CANCELLED:
+                        operation.finishing = False
+                    if operation.state == SetupOperationState.RUNNING:
+                        self._schedule_expiration_if_detached(operation)
+                    snapshot = operation.snapshot()
+        if close_error is not None:
+            raise SetupOperationError(
+                "verification_failed",
+                "Sign-in verified, but the setup terminal could not be stopped. "
+                "Retry Check connection or Cancel.",
+            ) from close_error
+        return snapshot
+
+    async def _check_verifier(
+        self, action: SetupOperationAction, parameters: Mapping[str, object]
+    ) -> bool | None:
+        verification = asyncio.create_task(asyncio.to_thread(self._verifier, action, parameters))
+        try:
+            return await asyncio.shield(verification)
+        except asyncio.CancelledError:
+            # The status probe can own a short-lived vendor process.
+            with contextlib.suppress(Exception):
+                await asyncio.shield(verification)
+            raise
+
     async def cancel(self, operation_id: str) -> SetupOperationSnapshot:
         async with self._lock:
             operation = self._require(operation_id)
+            if operation.finishing and operation.state == SetupOperationState.RUNNING:
+                raise SetupOperationError("conflict", "The setup operation is finishing.")
             if operation.state in _TERMINAL_STATES:
                 return operation.snapshot()
             operation.state = SetupOperationState.CANCELLED
@@ -427,6 +537,8 @@ class SetupOperationManager:
             raise SetupOperationError("invalid_request", "Invalid setup attachment id.")
         async with self._lock:
             operation = self._require(operation_id)
+            if operation.finishing:
+                raise SetupOperationError("conflict", "The setup operation is finishing.")
             if operation.state != SetupOperationState.RUNNING:
                 raise SetupOperationError("conflict", "The setup operation is no longer running.")
             if operation.attachments:
@@ -554,6 +666,7 @@ class SetupOperationManager:
         except asyncio.CancelledError:
             return
 
+        assert operation.terminal is not None
         exit_code = operation.terminal.last_exit_status()
         if exit_code != 0:
             await self._finish(
@@ -596,21 +709,12 @@ class SetupOperationManager:
                 error="The command completed, but setup could not be verified.",
             )
             return
-        if verified:
-            try:
-                # Config persistence is brief and synchronous. Keeping it on
-                # this event loop means cancellation cannot report completion
-                # while an abandoned worker thread continues writing config.
-                self._post_success(operation.action, operation.parameters)
-            except Exception:  # noqa: BLE001 - persistence errors may contain secrets
-                await self._finish(
-                    operation,
-                    SetupOperationState.FAILED,
-                    exit_code=exit_code,
-                    error="Setup was verified, but Omnigent could not save the connection.",
-                )
-                return
-        await self._finish(operation, SetupOperationState.SUCCEEDED, exit_code=exit_code)
+        await self._finish(
+            operation,
+            SetupOperationState.SUCCEEDED,
+            exit_code=exit_code,
+            persist_verified=bool(verified),
+        )
 
     async def _finish(
         self,
@@ -619,10 +723,17 @@ class SetupOperationManager:
         *,
         exit_code: int | None,
         error: str | None = None,
+        persist_verified: bool = False,
     ) -> None:
         async with self._lock:
             if operation.state in _TERMINAL_STATES:
                 return
+            if persist_verified:
+                try:
+                    self._post_success(operation.action, operation.parameters)
+                except Exception:  # noqa: BLE001 - persistence errors may contain secrets
+                    state = SetupOperationState.FAILED
+                    error = "Setup was verified, but Omnigent could not save the connection."
             operation.state = state
             operation.exit_code = exit_code
             operation.error = error
@@ -643,6 +754,7 @@ class SetupOperationManager:
         attachment_id: str,
         attachment: _TerminalAttachment,
     ) -> None:
+        assert operation.terminal is not None
         try:
             await bridge_tmux_control_to_websocket(
                 attachment,  # type: ignore[arg-type]
@@ -700,7 +812,8 @@ class SetupOperationManager:
         async with operation.close_lock:
             if operation.terminal_closed:
                 return
-            await operation.terminal.close()
+            if operation.terminal is not None:
+                await operation.terminal.close()
             operation.terminal_closed = True
 
     def _require(self, operation_id: str) -> _Operation:
@@ -814,6 +927,7 @@ def _verify_action(
         return ucode_workspace_exists(str(parameters["workspace_url"]))
     from omnigent.onboarding.harness_install import (
         CURSOR_KEY,
+        READINESS_CLI_PROBE_TIMEOUT_S,
         harness_cli_logged_in,
         invalidate_harness_login_cache,
     )
@@ -825,6 +939,8 @@ def _verify_action(
         SetupOperationAction.ANTIGRAVITY_LOGIN: GEMINI_FAMILY,
     }.get(action)
     if login_key is not None:
+        if action == SetupOperationAction.ANTIGRAVITY_LOGIN:
+            return harness_cli_logged_in(login_key, timeout=READINESS_CLI_PROBE_TIMEOUT_S)
         return harness_cli_logged_in(login_key)
     logout_key = {
         SetupOperationAction.CURSOR_LOGOUT: CURSOR_KEY,

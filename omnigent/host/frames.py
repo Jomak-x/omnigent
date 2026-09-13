@@ -1047,6 +1047,7 @@ class SetupMethod(str, Enum):
     DETECT = "detect"
     START = "start"
     GET = "get"
+    VERIFY = "verify"
     CANCEL = "cancel"
     ATTACH = "attach"
     DETACH = "detach"

@@ -324,6 +324,7 @@ function ProviderHostSettings({ host }: { host: Host }) {
   const [checkingHarness, setCheckingHarness] = useState<SetupStatusHarness | null>(null);
   const [operation, setOperation] = useState<SetupOperation | null>(null);
   const currentOperationIdRef = useRef<string | null>(null);
+  const latestOperationRef = useRef<SetupOperation | null>(null);
   const [operationAgentId, setOperationAgentId] = useState<string | null>(null);
   const [operationRecoveryPending, setOperationRecoveryPending] = useState(
     () => readSetupOperationId(host.host_id) !== null,
@@ -375,6 +376,7 @@ function ProviderHostSettings({ host }: { host: Host }) {
         if (disposed) return;
         if (recovered.state === "pending" || recovered.state === "running") {
           currentOperationIdRef.current = recovered.operation_id;
+          latestOperationRef.current = recovered;
           setOperation(recovered);
           const recoveredAgentId =
             recovered.action === "databricks-configure"
@@ -413,6 +415,12 @@ function ProviderHostSettings({ host }: { host: Host }) {
 
   const updateOperation = (next: SetupOperation) => {
     if (next.operation_id !== currentOperationIdRef.current) return;
+    const previous = latestOperationRef.current;
+    const previousFinished =
+      previous && previous.state !== "pending" && previous.state !== "running";
+    const nextActive = next.state === "pending" || next.state === "running";
+    if (previous?.operation_id === next.operation_id && previousFinished && nextActive) return;
+    latestOperationRef.current = next;
     setOperation(next);
     if (next.state === "pending" || next.state === "running") {
       rememberSetupOperation(host.host_id, next.operation_id);
@@ -585,6 +593,17 @@ function ProviderHostSettings({ host }: { host: Host }) {
           message={`The previous setup operation could not be restored: ${operationRecoveryError}`}
           onRetry={() => setOperationRecoveryAttempt((attempt) => attempt + 1)}
         />
+      )}
+      {operationMutation.isPending && (
+        <div
+          role="status"
+          className="flex items-center gap-2 rounded-lg border border-border bg-muted/30 px-3 py-2 text-sm text-muted-foreground"
+        >
+          <Loader2Icon className="size-4 animate-spin" aria-hidden="true" />
+          {operationMutation.variables?.action === "antigravity-login"
+            ? "Checking connection…"
+            : "Starting setup…"}
+        </div>
       )}
       {operation?.action === "databricks-configure" && !operationAgentId && (
         <div ref={operationPanelRef} className="rounded-xl border border-border bg-card p-4">
@@ -1679,6 +1698,8 @@ function AgentSettings({
   const needsUpdate = readiness === "version-too-low";
   const needsInstall = !availableLogin && (readiness === false || readiness === "binary-missing");
   const canInstall = agent && harnessInstallableOnHost(info, agent.harness, host);
+  const operationInProgress = operation?.state === "pending" || operation?.state === "running";
+  const activeOperationAgent = AGENT_OPTIONS.find((item) => item.id === operationAgentId);
   const chooseAgent = (id: string | null) => {
     setMethod(null);
     setManagedProvider(null);
@@ -1688,6 +1709,13 @@ function AgentSettings({
     if (statusErrors[item.harness]) return "Status check failed";
     const checked = checkedStatuses[item.harness];
     if (checked) return checkedSetupStatusLabel(checked.availability);
+    if (
+      operationAgentId === item.id &&
+      operation?.action === "antigravity-login" &&
+      operation.state === "succeeded"
+    ) {
+      return "Connected";
+    }
     const itemReadiness = host.configured_harnesses?.[item.harness];
     if (itemReadiness === true) return "Available on this computer";
     if (itemReadiness === "version-too-low") return "Update needed";
@@ -1706,65 +1734,84 @@ function AgentSettings({
     return "Choose how to connect";
   };
 
+  const activeOperationNotice =
+    operationInProgress && activeOperationAgent ? (
+      <div
+        role="status"
+        className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-info/30 bg-info/5 px-4 py-3 text-sm"
+      >
+        <span>{activeOperationAgent.label} connection in progress.</span>
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          onClick={() => chooseAgent(activeOperationAgent.id)}
+        >
+          Return to {activeOperationAgent.label}
+        </Button>
+      </div>
+    ) : null;
+
   if (!agent && !builtinAcp) {
     return (
-      <section className="overflow-hidden rounded-xl border border-border bg-card">
-        <div className="border-b px-4 py-3">
-          <h2 className="text-base font-semibold">Agents</h2>
-          <p className="text-sm text-muted-foreground">
-            Choose an agent to connect on {host.name}.
-          </p>
-        </div>
-        <div className="divide-y">
-          {AGENT_OPTIONS.filter((_, index) => showMore || index < 5).map((item) => {
-            const Icon = item.icon;
-            return (
-              <button
-                key={item.id}
-                data-testid={`setup-agent-${item.id}`}
-                type="button"
-                className="flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-muted/40"
-                onClick={() => chooseAgent(item.id)}
-              >
-                <Icon className="size-5 shrink-0" />
-                <span className="min-w-0 flex-1">
-                  <span className="block text-sm font-medium">{item.label}</span>
-                  <span className="block text-xs text-muted-foreground">{agentStatus(item)}</span>
-                </span>
-                <ChevronRightIcon className="size-4 text-muted-foreground" />
-              </button>
-            );
-          })}
-          {showMore &&
-            inventory.builtin_acp?.map((item) => {
-              const Icon = iconForAgent({ name: item.id, harness: item.id });
+      <div className="flex flex-col gap-3">
+        {activeOperationNotice}
+        <section className="overflow-hidden rounded-xl border border-border bg-card">
+          <div className="border-b px-4 py-3">
+            <h2 className="text-base font-semibold">Agents</h2>
+            <p className="text-sm text-muted-foreground">Choose an agent to connect.</p>
+          </div>
+          <div className="divide-y">
+            {AGENT_OPTIONS.filter((_, index) => showMore || index < 5).map((item) => {
+              const Icon = item.icon;
               return (
                 <button
                   key={item.id}
-                  type="button"
                   data-testid={`setup-agent-${item.id}`}
+                  type="button"
                   className="flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-muted/40"
                   onClick={() => chooseAgent(item.id)}
                 >
                   <Icon className="size-5 shrink-0" />
-                  <span className="min-w-0 flex-1 text-sm font-medium">{item.label}</span>
+                  <span className="min-w-0 flex-1">
+                    <span className="block text-sm font-medium">{item.label}</span>
+                    <span className="block text-xs text-muted-foreground">{agentStatus(item)}</span>
+                  </span>
                   <ChevronRightIcon className="size-4 text-muted-foreground" />
                 </button>
               );
             })}
-        </div>
-        <button
-          type="button"
-          className="flex w-full items-center justify-between border-t px-4 py-3 text-left text-sm text-muted-foreground hover:bg-muted/40"
-          onClick={() => setShowMore(!showMore)}
-          aria-expanded={showMore}
-        >
-          {showMore ? "Fewer agents" : "More agents"}
-          <ChevronDownIcon
-            className={cn("size-4 transition-transform", showMore && "rotate-180")}
-          />
-        </button>
-      </section>
+            {showMore &&
+              inventory.builtin_acp?.map((item) => {
+                const Icon = iconForAgent({ name: item.id, harness: item.id });
+                return (
+                  <button
+                    key={item.id}
+                    type="button"
+                    data-testid={`setup-agent-${item.id}`}
+                    className="flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-muted/40"
+                    onClick={() => chooseAgent(item.id)}
+                  >
+                    <Icon className="size-5 shrink-0" />
+                    <span className="min-w-0 flex-1 text-sm font-medium">{item.label}</span>
+                    <ChevronRightIcon className="size-4 text-muted-foreground" />
+                  </button>
+                );
+              })}
+          </div>
+          <button
+            type="button"
+            className="flex w-full items-center justify-between border-t px-4 py-3 text-left text-sm text-muted-foreground hover:bg-muted/40"
+            onClick={() => setShowMore(!showMore)}
+            aria-expanded={showMore}
+          >
+            {showMore ? "Fewer agents" : "More agents"}
+            <ChevronDownIcon
+              className={cn("size-4 transition-transform", showMore && "rotate-180")}
+            />
+          </button>
+        </section>
+      </div>
     );
   }
 
@@ -1804,485 +1851,505 @@ function AgentSettings({
   const Icon = agent.icon;
   const statusError = statusErrors[agent.harness];
   return (
-    <section className="overflow-hidden rounded-xl border border-border bg-card">
-      <div className="border-b px-4 py-3">
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          className="-ml-2 mb-2"
-          onClick={() => chooseAgent(null)}
-        >
-          <ArrowLeftIcon className="size-4" /> Back to agents
-        </Button>
-        <div className="flex items-center gap-3">
-          <Icon className="size-6" />
-          <div>
-            <h2 className="text-lg font-semibold">{agent.label}</h2>
-            <p className="text-sm text-muted-foreground">
-              {agentStatus(agent)} · {host.name}
-            </p>
+    <div className="flex flex-col gap-3">
+      {operationInProgress && operationAgentId !== agent.id && activeOperationNotice}
+      <section className="overflow-hidden rounded-xl border border-border bg-card">
+        <div className="border-b px-4 py-3">
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="-ml-2 mb-2"
+            onClick={() => chooseAgent(null)}
+          >
+            <ArrowLeftIcon className="size-4" /> Back to agents
+          </Button>
+          <div className="flex items-center gap-3">
+            <Icon className="size-6" />
+            <div>
+              <h2 className="text-lg font-semibold">{agent.label}</h2>
+              <p className="text-sm text-muted-foreground">{agentStatus(agent)}</p>
+            </div>
           </div>
-        </div>
-        {canMutate && (
-          <div className="mt-3 flex flex-wrap items-center gap-3">
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              loading={checkingHarness === agent.harness}
-              disabled={busy}
-              onClick={() => onCheckStatus(agent.harness)}
-            >
-              Check setup status
-            </Button>
-            <p className="text-xs text-muted-foreground">
-              Uses the CLI’s setup checks and may request access to stored credentials.
-            </p>
-          </div>
-        )}
-        {statusError && <InlineError message={statusError} />}
-      </div>
-      {(needsInstall || needsUpdate) && (
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b bg-muted/30 px-4 py-3">
-          <div>
-            <p className="text-sm font-medium">
-              {needsUpdate ? `Update ${agent.label}` : `Install ${agent.label}`}
-            </p>
-            <p className="text-xs text-muted-foreground">
-              {needsUpdate
-                ? `Update ${agent.label} on ${host.name}, then check setup status again.`
-                : (installStep?.detail ??
-                  `${agent.label} must be installed on ${host.name} before sign-in.`)}
-              {!needsUpdate &&
-                !canInstall &&
-                " Install it on this computer, then check setup status again."}
-            </p>
-          </div>
-          {!needsUpdate && canInstall && canMutate && (
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              loading={install.isPending}
-              disabled={busy}
-              onClick={() =>
-                install.mutate(agent.harness, {
-                  onSuccess: () => {
-                    void queryClient.invalidateQueries({
-                      queryKey: ["provider-setup", host.host_id],
-                    });
-                  },
-                })
-              }
-            >
-              Install
-            </Button>
-          )}
-          {install.isError && <InlineError message={install.error.message} />}
-        </div>
-      )}
-      {operation && operationAgentId === agent.id && (
-        <div ref={operationPanelRef} className="border-b p-4">
-          <ProviderSetupTerminal
-            key={operation.operation_id}
-            hostId={host.host_id}
-            operation={operation}
-            title={
-              operation.action === "codex-login"
-                ? "Sign in to ChatGPT"
-                : operation.action === "claude-login"
-                  ? "Sign in to Claude"
-                  : `${operation.action.replaceAll("-", " ")}`
-            }
-            onOperationChange={onOperationChange}
-            onFinished={onOperationFinished}
-          />
-        </div>
-      )}
-      {agent.id === "pi" && inventory.pi_default_requires_detection && (
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b p-4 text-sm">
-          <p className="text-muted-foreground">
-            {piDefaultChecked
-              ? inventory.effective_defaults.pi
-                ? `Default: ${inventory.effective_defaults.pi}`
-                : "No compatible default found."
-              : "Check local CLI configuration to identify Pi’s default."}
-          </p>
           {canMutate && (
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              disabled={busy}
-              onClick={onCheckPiDefault}
-            >
-              {piDefaultChecked ? "Check again" : "Check Pi default"}
-            </Button>
-          )}
-        </div>
-      )}
-      {compatible.length > 0 && (
-        <div className="border-b">
-          <h3 className="px-4 pt-4 text-sm font-medium">Saved connections</h3>
-          <p className="px-4 pb-2 text-xs text-muted-foreground">
-            Changing the default affects new {agent.label} sessions on {host.name}. Running sessions
-            keep their connection.
-          </p>
-          <div className="divide-y">
-            {compatible.map((provider) => {
-              const isDefault =
-                !!primarySurface && inventory.effective_defaults[primarySurface] === provider.name;
-              return (
-                <div
-                  key={provider.name}
-                  className="px-4 py-3"
-                  data-testid={`agent-provider-row-${provider.name}`}
-                >
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div>
-                      <p className="text-sm font-medium">
-                        {provider.name}{" "}
-                        {isDefault && <StatusBadge good>Used for new sessions</StatusBadge>}
-                      </p>
-                      <p className="text-xs text-muted-foreground">
-                        {setupLabel(provider.kind)} · Saved locally
-                      </p>
-                    </div>
-                    <div className="flex gap-2">
-                      {canMutate && primarySurface && !isDefault && (
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="outline"
-                          disabled={busy}
-                          onClick={() =>
-                            void onAction({
-                              action: "set_default",
-                              name: provider.name,
-                              surface: primarySurface,
-                            })
-                          }
-                        >
-                          Use for new {agent.label} sessions
-                        </Button>
-                      )}
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="ghost"
-                        onClick={() =>
-                          setManagedProvider(
-                            managedProvider === provider.name ? null : provider.name,
-                          )
-                        }
-                      >
-                        Manage
-                      </Button>
-                    </div>
-                  </div>
-                  {managedProvider === provider.name && (
-                    <div className="mt-3 rounded-lg border">
-                      <ProviderRow
-                        provider={provider}
-                        effectiveDefaults={inventory.effective_defaults}
-                        canMutate={canMutate}
-                        busy={busy}
-                        onDefault={(next) =>
-                          void onAction({
-                            action: "set_default",
-                            name: provider.name,
-                            surface: next,
-                          })
-                        }
-                        onRemove={() => setManagedProvider(`remove:${provider.name}`)}
-                      />
-                    </div>
-                  )}
-                  {managedProvider === `remove:${provider.name}` && (
-                    <ConfirmRemoval
-                      provider={provider}
-                      busy={busy}
-                      onCancel={() => setManagedProvider(provider.name)}
-                      onConfirm={() =>
-                        void onAction({ action: "remove_provider", name: provider.name }).then(
-                          (done) => {
-                            if (done) setManagedProvider(null);
-                          },
-                        )
-                      }
-                    />
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
-      {canMutate && (
-        <div className="p-4">
-          <h3 className="text-sm font-medium">
-            {compatible.length ? "Add connection" : "Connect"}
-          </h3>
-          <div className="mt-3 flex flex-wrap gap-2">
-            {agent.login && (
+            <div className="mt-3 flex flex-wrap items-center gap-3">
               <Button
                 type="button"
                 size="sm"
                 variant="outline"
-                disabled={busy || !availableLogin || needsInstall || needsUpdate}
-                onClick={() => void onStart(agent.login!)}
+                loading={checkingHarness === agent.harness}
+                disabled={busy}
+                onClick={() => onCheckStatus(agent.harness)}
               >
-                <TerminalIcon className="size-4" />{" "}
-                {agent.id === "codex"
-                  ? "ChatGPT subscription"
-                  : agent.id === "claude"
-                    ? "Claude subscription"
-                    : agent.id === "cursor" ||
-                        agent.id === "antigravity" ||
-                        agent.id === "kiro" ||
-                        agent.id === "kimi"
-                      ? `Sign in to ${agent.label}`
-                      : `Configure ${agent.label}`}
+                Check status
+              </Button>
+              <details className="text-xs text-muted-foreground">
+                <summary className="cursor-pointer">About this check</summary>
+                <p className="mt-1">
+                  It reads local CLI setup and may request credential access. It does not verify a
+                  vendor account.
+                </p>
+              </details>
+            </div>
+          )}
+          {statusError && <InlineError message={statusError} />}
+        </div>
+        {(needsInstall || needsUpdate) && (
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b bg-muted/30 px-4 py-3">
+            <div>
+              <p className="text-sm font-medium">
+                {needsUpdate ? `Update ${agent.label}` : `Install ${agent.label}`}
+              </p>
+              <p className="text-xs text-muted-foreground">
+                {needsUpdate
+                  ? `Update ${agent.label} on ${host.name}, then check setup status again.`
+                  : (installStep?.detail ??
+                    `${agent.label} must be installed on ${host.name} before sign-in.`)}
+                {!needsUpdate &&
+                  !canInstall &&
+                  " Install it on this computer, then check setup status again."}
+              </p>
+            </div>
+            {!needsUpdate && canInstall && canMutate && (
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                loading={install.isPending}
+                disabled={busy}
+                onClick={() =>
+                  install.mutate(agent.harness, {
+                    onSuccess: () => {
+                      void queryClient.invalidateQueries({
+                        queryKey: ["provider-setup", host.host_id],
+                      });
+                    },
+                  })
+                }
+              >
+                Install
               </Button>
             )}
-            {agent.login && !availableLogin && !needsInstall && (
-              <p className="w-full text-xs text-muted-foreground">
-                The {agent.label} setup command is unavailable on {host.name}. Check the installed
-                CLI and reconnect the host.
-              </p>
+            {install.isError && <InlineError message={install.error.message} />}
+          </div>
+        )}
+        {operation && operationAgentId === agent.id && operation.already_connected === true && (
+          <div role="status" className="border-b bg-success/5 px-4 py-3 text-sm text-success">
+            Connected. Antigravity is already signed in on this computer.
+          </div>
+        )}
+        {operation &&
+          operationAgentId === agent.id &&
+          operation.action === "antigravity-login" &&
+          operation.state === "succeeded" &&
+          operation.already_connected !== true && (
+            <div role="status" className="border-b bg-success/5 px-4 py-3 text-sm text-success">
+              Connected.
+            </div>
+          )}
+        {operation && operationAgentId === agent.id && operation.already_connected !== true && (
+          <div ref={operationPanelRef} className="border-b p-4">
+            <ProviderSetupTerminal
+              key={operation.operation_id}
+              hostId={host.host_id}
+              operation={operation}
+              title={
+                operation.action === "codex-login"
+                  ? "Sign in to ChatGPT"
+                  : operation.action === "claude-login"
+                    ? "Sign in to Claude"
+                    : `${operation.action.replaceAll("-", " ")}`
+              }
+              onOperationChange={onOperationChange}
+              onFinished={onOperationFinished}
+            />
+          </div>
+        )}
+        {agent.id === "pi" && inventory.pi_default_requires_detection && (
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b p-4 text-sm">
+            <p className="text-muted-foreground">
+              {piDefaultChecked
+                ? inventory.effective_defaults.pi
+                  ? `Default: ${inventory.effective_defaults.pi}`
+                  : "No compatible default found."
+                : "Check local CLI configuration to identify Pi’s default."}
+            </p>
+            {canMutate && (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={busy}
+                onClick={onCheckPiDefault}
+              >
+                {piDefaultChecked ? "Check again" : "Check Pi default"}
+              </Button>
             )}
-            {agent.id === "pi" && (
-              <div className="flex flex-col gap-1">
+          </div>
+        )}
+        {compatible.length > 0 && (
+          <div className="border-b">
+            <h3 className="px-4 pt-4 text-sm font-medium">Saved connections</h3>
+            <p className="px-4 pb-2 text-xs text-muted-foreground">
+              Changing the default affects new {agent.label} sessions on {host.name}. Running
+              sessions keep their connection.
+            </p>
+            <div className="divide-y">
+              {compatible.map((provider) => {
+                const isDefault =
+                  !!primarySurface &&
+                  inventory.effective_defaults[primarySurface] === provider.name;
+                return (
+                  <div
+                    key={provider.name}
+                    className="px-4 py-3"
+                    data-testid={`agent-provider-row-${provider.name}`}
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div>
+                        <p className="text-sm font-medium">
+                          {provider.name}{" "}
+                          {isDefault && <StatusBadge good>Used for new sessions</StatusBadge>}
+                        </p>
+                        <p className="text-xs text-muted-foreground">
+                          {setupLabel(provider.kind)} · Saved locally
+                        </p>
+                      </div>
+                      <div className="flex gap-2">
+                        {canMutate && primarySurface && !isDefault && (
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            disabled={busy}
+                            onClick={() =>
+                              void onAction({
+                                action: "set_default",
+                                name: provider.name,
+                                surface: primarySurface,
+                              })
+                            }
+                          >
+                            Use for new {agent.label} sessions
+                          </Button>
+                        )}
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="ghost"
+                          onClick={() =>
+                            setManagedProvider(
+                              managedProvider === provider.name ? null : provider.name,
+                            )
+                          }
+                        >
+                          Manage
+                        </Button>
+                      </div>
+                    </div>
+                    {managedProvider === provider.name && (
+                      <div className="mt-3 rounded-lg border">
+                        <ProviderRow
+                          provider={provider}
+                          effectiveDefaults={inventory.effective_defaults}
+                          canMutate={canMutate}
+                          busy={busy}
+                          onDefault={(next) =>
+                            void onAction({
+                              action: "set_default",
+                              name: provider.name,
+                              surface: next,
+                            })
+                          }
+                          onRemove={() => setManagedProvider(`remove:${provider.name}`)}
+                        />
+                      </div>
+                    )}
+                    {managedProvider === `remove:${provider.name}` && (
+                      <ConfirmRemoval
+                        provider={provider}
+                        busy={busy}
+                        onCancel={() => setManagedProvider(provider.name)}
+                        onConfirm={() =>
+                          void onAction({ action: "remove_provider", name: provider.name }).then(
+                            (done) => {
+                              if (done) setManagedProvider(null);
+                            },
+                          )
+                        }
+                      />
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+        {canMutate && (
+          <div className="p-4">
+            <h3 className="text-sm font-medium">
+              {compatible.length ? "Add connection" : "Connect"}
+            </h3>
+            <div className="mt-3 flex flex-wrap gap-2">
+              {agent.login && (
                 <Button
                   type="button"
                   size="sm"
                   variant="outline"
-                  disabled={busy || needsInstall}
-                  onClick={() => void onAction({ action: "subscription", cli: "pi" })}
+                  disabled={busy || !availableLogin || needsInstall || needsUpdate}
+                  onClick={() => void onStart(agent.login!)}
                 >
-                  Use Pi’s local configuration
+                  <TerminalIcon className="size-4" />{" "}
+                  {agent.id === "codex"
+                    ? "ChatGPT subscription"
+                    : agent.id === "claude"
+                      ? "Claude subscription"
+                      : agent.id === "cursor" ||
+                          agent.id === "antigravity" ||
+                          agent.id === "kiro" ||
+                          agent.id === "kimi"
+                        ? `Sign in to ${agent.label}`
+                        : `Configure ${agent.label}`}
                 </Button>
-                <p className="text-xs text-muted-foreground">
-                  Saves local routing to Pi; it does not check your Pi sign-in.
+              )}
+              {agent.login && !availableLogin && !needsInstall && (
+                <p className="w-full text-xs text-muted-foreground">
+                  The {agent.label} setup command is unavailable on {host.name}. Check the installed
+                  CLI and reconnect the host.
                 </p>
-              </div>
-            )}
-            {(agent.id === "claude" || agent.id === "codex" || agent.id === "pi") && (
-              <Button
-                type="button"
-                size="sm"
-                variant={method === "key" ? "secondary" : "outline"}
-                disabled={busy}
-                onClick={() => setMethod(method === "key" ? null : "key")}
-              >
-                <KeyRoundIcon className="size-4" /> API key
-              </Button>
-            )}
-            {(agent.id === "claude" || agent.id === "codex" || agent.id === "pi") && (
-              <Button
-                type="button"
-                size="sm"
-                variant={method === "gateway" ? "secondary" : "outline"}
-                disabled={busy}
-                onClick={() => setMethod(method === "gateway" ? null : "gateway")}
-              >
-                Compatible gateway
-              </Button>
-            )}
-            {agent.id === "claude" && (
-              <Button
-                type="button"
-                size="sm"
-                variant={method === "bedrock" ? "secondary" : "outline"}
-                disabled={busy}
-                onClick={() => setMethod(method === "bedrock" ? null : "bedrock")}
-              >
-                Bedrock
-              </Button>
-            )}
-            {agent.id === "cursor" && (
-              <Button
-                type="button"
-                size="sm"
-                variant={method === "cursor-key" ? "secondary" : "outline"}
-                disabled={busy}
-                onClick={() => setMethod(method === "cursor-key" ? null : "cursor-key")}
-              >
-                Cursor API key
-              </Button>
-            )}
-            {(["antigravity", "copilot", "opencode"] as const).includes(
-              agent.id as "antigravity" | "copilot" | "opencode",
-            ) && (
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                disabled={busy}
-                onClick={() => {
-                  const next =
-                    agent.id === "antigravity"
-                      ? "antigravity-key"
-                      : agent.id === "copilot"
-                        ? "copilot-settings"
-                        : "opencode-model";
-                  setMethod(method === next ? null : next);
-                }}
-              >
-                {agent.id === "opencode"
-                  ? "Default model"
-                  : agent.id === "copilot"
-                    ? "Copilot token and host"
-                    : "Antigravity API key"}
-              </Button>
-            )}
-            {(agent.id === "claude" || agent.id === "codex" || agent.id === "pi") && (
-              <Button
-                type="button"
-                size="sm"
-                variant={method === "databricks" ? "secondary" : "outline"}
-                disabled={busy}
-                onClick={() => setMethod(method === "databricks" ? null : "databricks")}
-              >
-                Databricks
-              </Button>
-            )}
-          </div>
-          {method && (
-            <div className="mt-4 rounded-lg border bg-muted/20 p-4">
-              {method === "key" && (
-                <KeyProviderForm
-                  key={agent.id}
-                  catalog={inventory.key_providers.filter((item) =>
-                    agent.surfaces.includes(item.family as ProviderSurface),
-                  )}
-                  defaultModels={detection?.default_models ?? {}}
-                  busy={busy}
-                  onAction={onAction}
-                  onDone={() => setMethod(null)}
-                />
               )}
-              {method === "gateway" && (
-                <GatewayForm
-                  key={agent.id}
-                  initialFamily={agent.id === "claude" ? "anthropic" : "openai"}
-                  busy={busy}
-                  onAction={onAction}
-                  onDone={() => setMethod(null)}
-                />
-              )}
-              {method === "bedrock" && (
-                <BedrockForm busy={busy} onAction={onAction} onDone={() => setMethod(null)} />
-              )}
-              {method === "cursor-key" && (
-                <HarnessKeyRow
-                  harness="cursor"
-                  configured={inventory.harness_settings.cursor_key_configured}
-                  canMutate={canMutate}
-                  busy={busy}
-                  onAction={onAction}
-                />
-              )}
-              {method === "antigravity-key" && (
-                <HarnessKeyRow
-                  harness="antigravity"
-                  configured={inventory.harness_settings.antigravity_key_configured}
-                  canMutate={canMutate}
-                  busy={busy}
-                  onAction={onAction}
-                />
-              )}
-              {method === "copilot-settings" && (
-                <div className="divide-y">
-                  <HarnessKeyRow
-                    harness="copilot"
-                    configured={inventory.harness_settings.copilot_key_configured}
-                    canMutate={canMutate}
-                    busy={busy}
-                    onAction={onAction}
-                  />
-                  <CopilotHostRow
-                    value={inventory.harness_settings.copilot_host ?? ""}
-                    canMutate={canMutate}
-                    busy={busy}
-                    onAction={onAction}
-                  />
+              {agent.id === "pi" && (
+                <div className="flex flex-col gap-1">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    disabled={busy || needsInstall}
+                    onClick={() => void onAction({ action: "subscription", cli: "pi" })}
+                  >
+                    Use Pi’s local configuration
+                  </Button>
+                  <p className="text-xs text-muted-foreground">
+                    Saves local routing to Pi; it does not check your Pi sign-in.
+                  </p>
                 </div>
               )}
-              {method === "opencode-model" && (
-                <OpenCodeModelRow
-                  value={inventory.harness_settings.opencode_model ?? ""}
-                  models={detection?.models.opencode ?? []}
-                  canMutate={canMutate}
-                  busy={busy}
-                  onAction={onAction}
-                />
+              {(agent.id === "claude" || agent.id === "codex" || agent.id === "pi") && (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant={method === "key" ? "secondary" : "outline"}
+                  disabled={busy}
+                  onClick={() => setMethod(method === "key" ? null : "key")}
+                >
+                  <KeyRoundIcon className="size-4" /> API key
+                </Button>
               )}
-              {method === "databricks" && (
-                <DatabricksGuidedRow
-                  initialAgent={agent.id as "claude" | "codex" | "pi"}
-                  canMutate={canMutate}
-                  available={operationAvailable(inventory, "databricks-configure")}
-                  busy={busy}
-                  onStart={(action, parameters) => onStart(action, parameters, agent.id)}
-                />
+              {(agent.id === "claude" || agent.id === "codex" || agent.id === "pi") && (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant={method === "gateway" ? "secondary" : "outline"}
+                  disabled={busy}
+                  onClick={() => setMethod(method === "gateway" ? null : "gateway")}
+                >
+                  Compatible gateway
+                </Button>
+              )}
+              {agent.id === "claude" && (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant={method === "bedrock" ? "secondary" : "outline"}
+                  disabled={busy}
+                  onClick={() => setMethod(method === "bedrock" ? null : "bedrock")}
+                >
+                  Bedrock
+                </Button>
+              )}
+              {agent.id === "cursor" && (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant={method === "cursor-key" ? "secondary" : "outline"}
+                  disabled={busy}
+                  onClick={() => setMethod(method === "cursor-key" ? null : "cursor-key")}
+                >
+                  Cursor API key
+                </Button>
+              )}
+              {(["antigravity", "copilot", "opencode"] as const).includes(
+                agent.id as "antigravity" | "copilot" | "opencode",
+              ) && (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  disabled={busy}
+                  onClick={() => {
+                    const next =
+                      agent.id === "antigravity"
+                        ? "antigravity-key"
+                        : agent.id === "copilot"
+                          ? "copilot-settings"
+                          : "opencode-model";
+                    setMethod(method === next ? null : next);
+                  }}
+                >
+                  {agent.id === "opencode"
+                    ? "Default model"
+                    : agent.id === "copilot"
+                      ? "Copilot token and host"
+                      : "Antigravity API key"}
+                </Button>
+              )}
+              {(agent.id === "claude" || agent.id === "codex" || agent.id === "pi") && (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant={method === "databricks" ? "secondary" : "outline"}
+                  disabled={busy}
+                  onClick={() => setMethod(method === "databricks" ? null : "databricks")}
+                >
+                  Databricks
+                </Button>
               )}
             </div>
-          )}
-          {agent.surfaces.length > 0 && (
-            <div className="mt-4">
-              <Button
-                type="button"
-                size="sm"
-                variant="ghost"
-                loading={detecting}
-                disabled={busy}
-                onClick={onDetect}
-              >
-                <WandSparklesIcon className="size-4" /> Find credentials on this computer
-              </Button>
-            </div>
-          )}
-          {agent.surfaces.length > 0 && detection && (
-            <div className="mt-3 rounded-lg border">
-              <DetectionResults
-                detection={{
-                  ...detection,
-                  providers: detection.providers.filter((item) =>
-                    detectedProviderMatchesAgent(item, agent),
-                  ),
-                  warnings: detection.warnings?.filter(
-                    (warning) =>
-                      agent.id === "claude" || warning !== CLAUDE_KEYCHAIN_DETECTION_NOTICE,
-                  ),
-                }}
-                dismissed={inventory.dismissed_detections}
-                canMutate={canMutate}
-                busy={busy}
-                onAction={onAction}
-              />
-            </div>
-          )}
-          {agent.logout &&
-            agent.id !== "claude" &&
-            agent.id !== "codex" &&
-            operationAvailable(inventory, agent.logout) && (
-              <div className="mt-4 border-t pt-3">
+            {method && (
+              <div className="mt-4 rounded-lg border bg-muted/20 p-4">
+                {method === "key" && (
+                  <KeyProviderForm
+                    key={agent.id}
+                    catalog={inventory.key_providers.filter((item) =>
+                      agent.surfaces.includes(item.family as ProviderSurface),
+                    )}
+                    defaultModels={detection?.default_models ?? {}}
+                    busy={busy}
+                    onAction={onAction}
+                    onDone={() => setMethod(null)}
+                  />
+                )}
+                {method === "gateway" && (
+                  <GatewayForm
+                    key={agent.id}
+                    initialFamily={agent.id === "claude" ? "anthropic" : "openai"}
+                    busy={busy}
+                    onAction={onAction}
+                    onDone={() => setMethod(null)}
+                  />
+                )}
+                {method === "bedrock" && (
+                  <BedrockForm busy={busy} onAction={onAction} onDone={() => setMethod(null)} />
+                )}
+                {method === "cursor-key" && (
+                  <HarnessKeyRow
+                    harness="cursor"
+                    configured={inventory.harness_settings.cursor_key_configured}
+                    canMutate={canMutate}
+                    busy={busy}
+                    onAction={onAction}
+                  />
+                )}
+                {method === "antigravity-key" && (
+                  <HarnessKeyRow
+                    harness="antigravity"
+                    configured={inventory.harness_settings.antigravity_key_configured}
+                    canMutate={canMutate}
+                    busy={busy}
+                    onAction={onAction}
+                  />
+                )}
+                {method === "copilot-settings" && (
+                  <div className="divide-y">
+                    <HarnessKeyRow
+                      harness="copilot"
+                      configured={inventory.harness_settings.copilot_key_configured}
+                      canMutate={canMutate}
+                      busy={busy}
+                      onAction={onAction}
+                    />
+                    <CopilotHostRow
+                      value={inventory.harness_settings.copilot_host ?? ""}
+                      canMutate={canMutate}
+                      busy={busy}
+                      onAction={onAction}
+                    />
+                  </div>
+                )}
+                {method === "opencode-model" && (
+                  <OpenCodeModelRow
+                    value={inventory.harness_settings.opencode_model ?? ""}
+                    models={detection?.models.opencode ?? []}
+                    canMutate={canMutate}
+                    busy={busy}
+                    onAction={onAction}
+                  />
+                )}
+                {method === "databricks" && (
+                  <DatabricksGuidedRow
+                    initialAgent={agent.id as "claude" | "codex" | "pi"}
+                    canMutate={canMutate}
+                    available={operationAvailable(inventory, "databricks-configure")}
+                    busy={busy}
+                    onStart={(action, parameters) => onStart(action, parameters, agent.id)}
+                  />
+                )}
+              </div>
+            )}
+            {agent.surfaces.length > 0 && (
+              <div className="mt-4">
                 <Button
                   type="button"
                   size="sm"
                   variant="ghost"
+                  loading={detecting}
                   disabled={busy}
-                  onClick={() => void onStart(agent.logout!)}
+                  onClick={onDetect}
                 >
-                  Sign out of {agent.label}
+                  <WandSparklesIcon className="size-4" /> Find credentials on this computer
                 </Button>
               </div>
             )}
-        </div>
-      )}
-    </section>
+            {agent.surfaces.length > 0 && detection && (
+              <div className="mt-3 rounded-lg border">
+                <DetectionResults
+                  detection={{
+                    ...detection,
+                    providers: detection.providers.filter((item) =>
+                      detectedProviderMatchesAgent(item, agent),
+                    ),
+                    warnings: detection.warnings?.filter(
+                      (warning) =>
+                        agent.id === "claude" || warning !== CLAUDE_KEYCHAIN_DETECTION_NOTICE,
+                    ),
+                  }}
+                  dismissed={inventory.dismissed_detections}
+                  canMutate={canMutate}
+                  busy={busy}
+                  onAction={onAction}
+                />
+              </div>
+            )}
+            {agent.logout &&
+              agent.id !== "claude" &&
+              agent.id !== "codex" &&
+              operationAvailable(inventory, agent.logout) && (
+                <div className="mt-4 border-t pt-3">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    disabled={busy}
+                    onClick={() => void onStart(agent.logout!)}
+                  >
+                    Sign out of {agent.label}
+                  </Button>
+                </div>
+              )}
+          </div>
+        )}
+      </section>
+    </div>
   );
 }
 

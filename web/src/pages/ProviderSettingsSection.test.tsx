@@ -43,6 +43,9 @@ vi.mock("@/components/ProviderSetupTerminal", () => ({
       <button type="button" onClick={() => onOperationChange({ ...operation, state: "succeeded" })}>
         Simulate operation completion
       </button>
+      <button type="button" onClick={() => onOperationChange({ ...operation, state: "running" })}>
+        Simulate stale running poll
+      </button>
       <button
         type="button"
         onClick={() => {
@@ -715,9 +718,53 @@ describe("ProviderSettingsSection", () => {
     renderSection();
 
     await openAgent("antigravity");
-    expect(screen.getByText("Sign-in needed · mac")).toBeInTheDocument();
-    expect(screen.queryByText("Ready on this computer · mac")).toBeNull();
+    expect(screen.getByText("Sign-in needed")).toBeInTheDocument();
+    expect(screen.queryByText("Ready on this computer")).toBeNull();
     expect(screen.getByRole("button", { name: "Sign in to Antigravity" })).toBeInTheDocument();
+  });
+
+  it("shows an already verified Antigravity connection without opening a terminal", async () => {
+    hosts = [online("mac")];
+    inventories.set("mac", inventory({ supported_operations: ["antigravity-login"] }));
+    startSetupOperationMock.mockResolvedValue({
+      operation_id: "op-antigravity",
+      state: "succeeded",
+      action: "antigravity-login",
+      exit_code: null,
+      error: null,
+      already_connected: true,
+    });
+    renderSection();
+
+    await openAgent("antigravity");
+    fireEvent.click(screen.getByRole("button", { name: "Sign in to Antigravity" }));
+
+    expect(await screen.findByText(/Antigravity is already signed in/i)).toBeInTheDocument();
+    expect(screen.queryByTestId("setup-terminal")).toBeNull();
+  });
+
+  it("keeps an active connection discoverable after choosing another agent", async () => {
+    hosts = [online("mac")];
+    inventories.set("mac", inventory({ supported_operations: ["antigravity-login"] }));
+    startSetupOperationMock.mockResolvedValue({
+      operation_id: "op-antigravity",
+      state: "running",
+      action: "antigravity-login",
+      exit_code: null,
+      error: null,
+      can_verify: true,
+    });
+    renderSection();
+
+    await openAgent("antigravity");
+    fireEvent.click(screen.getByRole("button", { name: "Sign in to Antigravity" }));
+    await screen.findByTestId("setup-terminal");
+    fireEvent.click(screen.getByRole("button", { name: "Back to agents" }));
+    await openAgent("codex");
+
+    expect(screen.getByText("Antigravity connection in progress.")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Return to Antigravity" }));
+    expect(await screen.findByTestId("setup-terminal")).toBeInTheDocument();
   });
 
   it("does not claim a vendor sign-in when harness status is missing", async () => {
@@ -726,7 +773,7 @@ describe("ProviderSettingsSection", () => {
     renderSection();
 
     await openAgent("codex");
-    expect(screen.getByText("Sign-in status not checked · mac")).toBeInTheDocument();
+    expect(screen.getByText("Sign-in status not checked")).toBeInTheDocument();
   });
 
   it("checks only the selected native harness on the selected computer", async () => {
@@ -744,23 +791,23 @@ describe("ProviderSettingsSection", () => {
 
     await openAgent("antigravity");
     expect(detectSetupMock).not.toHaveBeenCalled();
-    expect(screen.getByText("Sign-in status not checked · Mac")).toBeInTheDocument();
-    expect(screen.getByText(/Uses the CLI’s setup checks/)).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Check setup status" }));
+    expect(screen.getByText("Sign-in status not checked")).toBeInTheDocument();
+    expect(screen.getByText(/It reads local CLI setup/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Check status" }));
     await waitFor(() =>
       expect(detectSetupMock).toHaveBeenCalledWith("mac", { harness: "antigravity-native" }),
     );
-    expect(await screen.findByText("Ready according to setup · Mac")).toBeInTheDocument();
+    expect(await screen.findByText("Ready according to setup")).toBeInTheDocument();
 
     fireEvent.change(hostSelect(), { target: { value: "linux" } });
     await openAgent("antigravity");
-    expect(screen.getByText("Sign-in status not checked · Linux")).toBeInTheDocument();
+    expect(screen.getByText("Sign-in status not checked")).toBeInTheDocument();
     expect(detectSetupMock).toHaveBeenCalledTimes(1);
-    fireEvent.click(screen.getByRole("button", { name: "Check setup status" }));
+    fireEvent.click(screen.getByRole("button", { name: "Check status" }));
     await waitFor(() =>
       expect(detectSetupMock).toHaveBeenCalledWith("linux", { harness: "antigravity-native" }),
     );
-    expect(await screen.findByText("Ready according to setup · Linux")).toBeInTheDocument();
+    expect(await screen.findByText("Ready according to setup")).toBeInTheDocument();
   });
 
   it("keeps credential discovery after a status check and clears failed checked status", async () => {
@@ -789,18 +836,18 @@ describe("ProviderSettingsSection", () => {
     await openAgent("codex");
     fireEvent.click(screen.getByRole("button", { name: "Find credentials on this computer" }));
     expect(await screen.findByText("openai-key")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Check setup status" }));
-    expect(await screen.findByText("Ready according to setup · mac")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Check status" }));
+    expect(await screen.findByText("Ready according to setup")).toBeInTheDocument();
     await waitFor(() => expect(fetchInventoryMock).toHaveBeenCalledTimes(2));
     expect(screen.getByText("openai-key")).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Check setup status" }));
+    fireEvent.click(screen.getByRole("button", { name: "Check status" }));
     expect(
       await screen.findByText("The requested harness status could not be checked on this computer"),
     ).toBeInTheDocument();
-    expect(screen.queryByText("Ready according to setup · mac")).toBeNull();
-    expect(screen.queryByText("Available on this computer · mac")).toBeNull();
-    expect(screen.getByText("Status check failed · mac")).toBeInTheDocument();
+    expect(screen.queryByText("Ready according to setup")).toBeNull();
+    expect(screen.queryByText("Available on this computer")).toBeNull();
+    expect(screen.getByText("Status check failed")).toBeInTheDocument();
     expect(screen.getByText("openai-key")).toBeInTheDocument();
   });
 
@@ -821,8 +868,8 @@ describe("ProviderSettingsSection", () => {
     renderSection();
 
     await openAgent("codex");
-    fireEvent.click(screen.getByRole("button", { name: "Check setup status" }));
-    expect(await screen.findByText(`${label} · mac`)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Check status" }));
+    expect(await screen.findByText(`${label}`)).toBeInTheDocument();
   });
 
   it.each([
@@ -886,8 +933,8 @@ describe("ProviderSettingsSection", () => {
     renderSection();
 
     await openAgent("codex");
-    fireEvent.click(screen.getByRole("button", { name: "Check setup status" }));
-    expect(await screen.findByText("Ready according to setup · mac")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Check status" }));
+    expect(await screen.findByText("Ready according to setup")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Use for new Codex sessions" }));
     await waitFor(() =>
       expect(runSetupActionMock).toHaveBeenCalledWith("mac", {
@@ -896,13 +943,13 @@ describe("ProviderSettingsSection", () => {
         surface: "openai",
       }),
     );
-    expect(screen.queryByText("Ready according to setup · mac")).toBeNull();
+    expect(screen.queryByText("Ready according to setup")).toBeNull();
 
-    fireEvent.click(screen.getByRole("button", { name: "Check setup status" }));
-    expect(await screen.findByText("Ready according to setup · mac")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Check status" }));
+    expect(await screen.findByText("Ready according to setup")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "ChatGPT subscription" }));
     await waitFor(() => expect(startSetupOperationMock).toHaveBeenCalled());
-    expect(screen.queryByText("Ready according to setup · mac")).toBeNull();
+    expect(screen.queryByText("Ready according to setup")).toBeNull();
   });
 
   it("reveals only the selected advanced task and the host's built-in ACP instructions", async () => {
@@ -1389,6 +1436,25 @@ describe("ProviderSettingsSection", () => {
     expect(screen.getByTestId("setup-terminal")).toHaveAttribute("data-operation-id", "op-2");
     expect(sessionStorage.getItem("omnigent:provider-setup-operation:mac")).toBe("op-2");
     expect(screen.getByRole("button", { name: "ChatGPT subscription" })).toBeDisabled();
+  });
+
+  it("does not reopen a completed operation when a delayed poll reports it as running", async () => {
+    hosts = [online("mac")];
+    inventories.set("mac", inventory({ supported_operations: ["codex-login"] }));
+    renderSection();
+    await openAgent("codex");
+
+    fireEvent.click(screen.getByRole("button", { name: "ChatGPT subscription" }));
+    await screen.findByTestId("setup-terminal");
+    fireEvent.click(screen.getByRole("button", { name: "Simulate operation completion" }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "ChatGPT subscription" })).toBeEnabled(),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Simulate stale running poll" }));
+
+    expect(screen.getByRole("button", { name: "ChatGPT subscription" })).toBeEnabled();
+    expect(sessionStorage.getItem("omnigent:provider-setup-operation:mac")).toBeNull();
   });
 
   it("refreshes the selected host's sign-in commands after installing a harness", async () => {

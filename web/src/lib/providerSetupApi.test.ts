@@ -7,6 +7,7 @@ import {
   runSetupAction,
   setupOperationAttachUrl,
   startSetupOperation,
+  verifySetupOperation,
 } from "./providerSetupApi";
 import { authenticatedFetch } from "./identity";
 import { resolveWebSocketUrl } from "./host";
@@ -146,6 +147,29 @@ describe("provider setup API", () => {
     expect(mockAuthenticatedFetch).toHaveBeenNthCalledWith(3, `${base}/op%2F1`, {
       method: "DELETE",
     });
+  });
+
+  it("verifies on the selected host and preserves a retryable connection failure", async () => {
+    mockAuthenticatedFetch
+      .mockResolvedValueOnce(
+        mockJsonResponse({ detail: "Sign-in is not complete" }, { ok: false, status: 409 }),
+      )
+      .mockResolvedValueOnce(
+        mockJsonResponse({ operation_id: "op/1", state: "succeeded", already_connected: true }),
+      );
+
+    await expect(verifySetupOperation("host /?", "op/1")).rejects.toMatchObject({
+      status: 409,
+      message: "Sign-in is not complete",
+    });
+    await expect(verifySetupOperation("host /?", "op/1")).resolves.toMatchObject({
+      state: "succeeded",
+      already_connected: true,
+    });
+    expect(mockAuthenticatedFetch).toHaveBeenLastCalledWith(
+      "/v1/hosts/host%20%2F%3F/setup-operations/op%2F1/verify",
+      { method: "POST" },
+    );
   });
 
   it("resolves the attach URL with encoded host and operation and the host slice key", () => {

@@ -197,6 +197,16 @@ def create_host_setup_router(
         conn = await resolve(host_id, require_user(request, auth_provider))
         return await proxy_setup(host_registry, conn, SetupMethod.GET, operation_id=operation_id)
 
+    @router.post("/hosts/{host_id}/setup-operations/{operation_id}/verify")
+    async def verify(request: Request, host_id: str, operation_id: str) -> dict[str, Any]:
+        mutation_gate()
+        require_trusted_origin(request)
+        conn = await resolve(host_id, require_user(request, auth_provider))
+        async with conn.credential_write_lock:
+            return await proxy_setup(
+                host_registry, conn, SetupMethod.VERIFY, operation_id=operation_id
+            )
+
     @router.delete("/hosts/{host_id}/setup-operations/{operation_id}")
     async def cancel(request: Request, host_id: str, operation_id: str) -> dict[str, Any]:
         mutation_gate()

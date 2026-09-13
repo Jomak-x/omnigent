@@ -33,14 +33,38 @@ with log.open("a") as output:
 print("FIXTURE LOGIN COMPLETE", flush=True)
 """
 
+_FAKE_AGY_BODY = """import json, os, sys
+from pathlib import Path
+root = Path(os.environ["PROVIDER_FIXTURE_ROOT"])
+log = root / "terminal-fixture-inputs.jsonl"
+with log.open("a") as output:
+    output.write(json.dumps({"event":"agy_started", "pid":os.getpid()}) + "\\n")
+print("FIXTURE ANTIGRAVITY ONLY - no real sign-in", flush=True)
+print("Enter fixture-signin to complete the simulated browser sign-in: ", end="", flush=True)
+with log.open("a") as output:
+    output.write(json.dumps({"event":"agy_prompt_written", "pid":os.getpid()}) + "\\n")
+value = sys.stdin.readline().rstrip("\\r\\n")
+with log.open("a") as output:
+    output.write(json.dumps({"event":"agy_input", "pid":os.getpid(), "value":value}) + "\\n")
+if value == "fixture-signin":
+    (root / "agy-signed-in").write_text("fixture only\\n")
+    print("FIXTURE STATUS READY - terminal remains open", flush=True)
+while sys.stdin.readline():
+    pass
+"""
 
-def prepare(root: Path, python: Path, tmux: Path) -> None:
+
+def prepare(root: Path, python: Path, tmux: Path, *, antigravity: bool = False) -> None:
     """Write the only allowed pane program and a symlink to reviewed tmux."""
     binary_dir = root / "fixture-bin"
     binary_dir.mkdir(exist_ok=True)
     fake = binary_dir / "codex"
     fake.write_text(f"#!{python}\n" + _FAKE_BODY)
     fake.chmod(0o700)
+    if antigravity:
+        agy = binary_dir / "agy"
+        agy.write_text(f"#!{python}\n" + _FAKE_AGY_BODY)
+        agy.chmod(0o700)
     target = binary_dir / "tmux"
     if not target.exists():
         target.symlink_to(tmux)
@@ -57,14 +81,16 @@ class ProviderSetupTerminalRuntime(ProviderSetupRuntime):
         tmux: Path,
         port: int | None = None,
         timeout_test: bool = False,
+        antigravity: bool = False,
     ):
         super().__init__(root, checkout, port=port)
         self.tmux = tmux.resolve(strict=True)
         self.timeout_test = timeout_test
+        self.antigravity = antigravity
 
     def prepare(self) -> None:
         super().prepare()
-        prepare(self.root, self.python, self.tmux)
+        prepare(self.root, self.python, self.tmux, antigravity=self.antigravity)
 
     def environment(self, component: str) -> dict[str, str]:
         env = super().environment(component)
@@ -74,6 +100,7 @@ class ProviderSetupTerminalRuntime(ProviderSetupRuntime):
                 "PROVIDER_FIXTURE_TERMINAL": "1",
                 "PROVIDER_FIXTURE_TMUX": str(self.tmux),
                 "PROVIDER_FIXTURE_TIMEOUT_TEST": "1" if self.timeout_test else "0",
+                "PROVIDER_FIXTURE_ANTIGRAVITY": "1" if self.antigravity else "0",
             }
         )
         env["OMNIGENT_RUNNER_ENV_PASSTHROUGH"] = ",".join(env)
@@ -92,13 +119,21 @@ def install(root: Path, socket_root: Path, python: Path, tmux: Path):
     )
 
     fake = root / "fixture-bin/codex"
+    agy = root / "fixture-bin/agy"
     expected_body = f"#!{python}\n" + _FAKE_BODY
+    expected_agy_body = f"#!{python}\n" + _FAKE_AGY_BODY
+    antigravity = os.environ.get("PROVIDER_FIXTURE_ANTIGRAVITY") == "1"
     registered: dict[str, set[tuple[str, ...]]] = {}
 
     def create_terminal(plan: Any, operation_id: str):
-        if Path(plan.executable) != fake or tuple(plan.args) not in {("login",), ("logout",)}:
-            raise RuntimeError("Fixture only supports the local dummy Codex command")
-        if fake.read_text() != expected_body:
+        executable = Path(plan.executable)
+        if executable == fake and tuple(plan.args) in {("login",), ("logout",)}:
+            expected = expected_body
+        elif antigravity and executable == agy and tuple(plan.args) == ():
+            expected = expected_agy_body
+        else:
+            raise RuntimeError("Fixture only supports reviewed local dummy commands")
+        if executable.read_text() != expected:
             raise RuntimeError("Fixture dummy executable changed")
         private = Path(tempfile.mkdtemp(prefix="t-", dir=socket_root))
         private.chmod(0o700)
@@ -108,14 +143,14 @@ def install(root: Path, socket_root: Path, python: Path, tmux: Path):
             session_key=operation_id,
             socket_path=private / "tmux.sock",
             private_dir=private,
-            command=str(fake),
+            command=str(executable),
             args=list(plan.args),
             env={"SHELL": "/bin/sh"},
             env_unset=["BASH_ENV", "ENV"],
             scrollback=1000,
             keep_alive_after_exit=True,
         )
-        command = " ".join(shlex.quote(arg) for arg in [str(fake), *plan.args])
+        command = " ".join(shlex.quote(arg) for arg in [str(executable), *plan.args])
         launch = _tmux_command_sequence(
             [
                 *_tmux_managed_option_commands(
@@ -176,9 +211,15 @@ def install(root: Path, socket_root: Path, python: Path, tmux: Path):
         return terminal
 
     def resolver(name: str) -> str | None:
-        return str(fake) if name == "codex" else str(tmux) if name == "tmux" else None
+        if name == "codex":
+            return str(fake)
+        if antigravity and name == "agy":
+            return str(agy)
+        return str(tmux) if name == "tmux" else None
 
     def verify(*args: Any) -> bool:
+        if antigravity and str(args[0]) == "antigravity-login":
+            return (root / "agy-signed-in").exists()
         log = root / "terminal-fixture-inputs.jsonl"
         rows = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
         return bool(rows and rows[-1].get("event") == "completed")
@@ -198,6 +239,25 @@ def install(root: Path, socket_root: Path, python: Path, tmux: Path):
         return self._manager
 
     HostSetupDispatcher._operations = operations
+    if antigravity:
+        from omnigent.onboarding import harness_install, harness_readiness
+        from omnigent.onboarding.provider_config import GEMINI_FAMILY
+
+        installed = harness_install.harness_cli_installed
+        harness_install.harness_cli_installed = lambda key, **kwargs: (
+            key == GEMINI_FAMILY or installed(key, **kwargs)
+        )
+        harness_readiness.harness_cli_installed = harness_install.harness_cli_installed
+        harness_readiness.resolve_cli_binary = resolver
+        harness_readiness._gemini_auth.gemini_login_detected = lambda: (
+            root / "agy-signed-in"
+        ).exists()
+        harness_install.harness_cli_logged_in = lambda key, **kwargs: (
+            (root / "agy-signed-in").exists() if key == GEMINI_FAMILY else False
+        )
+        import omnigent.host.setup_operations as setup_operations
+
+        setup_operations.resolve_cli_binary = lambda binary, **kwargs: resolver(binary)
 
     def permitted(command: Any, env: Any, executable: Any) -> bool:
         if not isinstance(command, (tuple, list)) or not command:
@@ -238,7 +298,9 @@ def install(root: Path, socket_root: Path, python: Path, tmux: Path):
                 or any(key in env for key in ("ENV", "BASH_ENV", "HOME", "CODEX_HOME"))
             ):
                 return False
-            if fake.read_text() != expected_body:
+            if fake.read_text() != expected_body or (
+                antigravity and agy.read_text() != expected_agy_body
+            ):
                 return False
         return True
 

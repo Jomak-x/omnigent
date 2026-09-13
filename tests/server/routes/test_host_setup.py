@@ -93,7 +93,12 @@ async def test_inventory_stays_readable_with_flag_off():
     response_task = asyncio.create_task(respond(conn, {"providers": []}))
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         result = await client.get("/v1/hosts/host-a/setup", headers={"x-user": "alice"})
-        for path in ("setup/actions", "setup/detect", "setup-operations"):
+        for path in (
+            "setup/actions",
+            "setup/detect",
+            "setup-operations",
+            "setup-operations/operation/verify",
+        ):
             denied = await client.post(
                 "/v1/hosts/host-a/" + path, headers={"x-user": "alice"}, json={}
             )
@@ -137,6 +142,41 @@ async def test_invalid_body_does_not_reflect_secrets():
     assert response.status_code == 422
     assert "fixture-secret" not in response.text
     assert conn.outbound_queue.empty()
+
+
+@pytest.mark.parametrize(
+    ("options", "headers", "status"),
+    [
+        ({}, {}, 401),
+        ({"online": False}, {"x-user": "alice"}, 409),
+        ({"protocol": 0}, {"x-user": "alice"}, 501),
+    ],
+)
+async def test_verify_rejects_unavailable_or_unauthenticated_host(options, headers, status):
+    app, _, conn, _ = make_app(**options)
+    queued_before = conn.outbound_queue.qsize()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        result = await client.post(
+            "/v1/hosts/host-a/setup-operations/operation/verify", headers=headers
+        )
+    assert result.status_code == status
+    assert conn.outbound_queue.qsize() == queued_before
+
+
+async def test_verify_is_authorized_and_forwarded_to_selected_host():
+    app, _, conn, _ = make_app()
+    denied_path = "/v1/hosts/host-a/setup-operations/operation/verify"
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        denied = await client.post(denied_path, headers={"x-user": "bob"})
+        assert denied.status_code == 403
+        responder = asyncio.create_task(respond(conn, {"state": "succeeded"}))
+        accepted = await client.post(denied_path, headers={"x-user": "alice"})
+
+    frame = await asyncio.wait_for(responder, timeout=2)
+    assert accepted.status_code == 200
+    assert accepted.json() == {"state": "succeeded"}
+    assert frame.method == SetupMethod.VERIFY
+    assert frame.operation_id == "operation"
 
 
 async def test_replaced_host_fails_request_and_drops_output():

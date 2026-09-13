@@ -193,6 +193,8 @@ export interface SetupOperation {
   action: SetupOperationAction;
   exit_code: number | null;
   error: string | null;
+  already_connected?: boolean;
+  can_verify?: boolean;
 }
 
 export class SetupApiError extends Error {
@@ -278,6 +280,12 @@ export function fetchSetupOperation(
 export function cancelSetupOperation(hostId: string, operationId: string): Promise<SetupOperation> {
   return setupFetch(`${operationsPath(hostId)}/${encodeURIComponent(operationId)}`, {
     method: "DELETE",
+  });
+}
+
+export function verifySetupOperation(hostId: string, operationId: string): Promise<SetupOperation> {
+  return setupFetch(`${operationsPath(hostId)}/${encodeURIComponent(operationId)}/verify`, {
+    method: "POST",
   });
 }
 

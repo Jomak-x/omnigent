@@ -81,6 +81,9 @@ class HostSetupDispatcher:
                     result = await self._operations().start(request)
             elif frame.method == SetupMethod.GET:
                 result = await self._operations().get(frame.operation_id)
+            elif frame.method == SetupMethod.VERIFY:
+                async with self.write_lock:
+                    result = await self._operations().verify(frame.operation_id)
             elif frame.method == SetupMethod.CANCEL:
                 result = await self._operations().cancel(frame.operation_id)
             elif frame.method == SetupMethod.ATTACH:

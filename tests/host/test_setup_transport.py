@@ -176,3 +176,18 @@ async def test_missing_prerequisite_retains_safe_actionable_error():
     assert result.error_status == 503
     assert "tmux" in result.error
     assert "required" in result.error
+
+
+async def test_verify_is_dispatched_to_host_operation_manager():
+    dispatcher = HostSetupDispatcher()
+    snapshot = Mock(as_dict=Mock(return_value={"state": "succeeded"}))
+    manager = Mock(verify=AsyncMock(return_value=snapshot))
+    dispatcher._manager = manager
+
+    result = await dispatcher.request(
+        HostSetupRequestFrame("request", SetupMethod.VERIFY, operation_id="operation"),
+        AsyncMock(),
+    )
+
+    assert result.payload == {"state": "succeeded"}
+    manager.verify.assert_awaited_once_with("operation")
