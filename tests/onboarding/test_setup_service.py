@@ -10,7 +10,7 @@ from omnigent.config import load_global_config, save_global_config
 from omnigent.onboarding import ambient, secrets
 from omnigent.onboarding import detected as _detected  # noqa: F401
 from omnigent.onboarding import setup_service as service
-from omnigent.onboarding.setup_schema import SETUP_ACTION_ADAPTER
+from omnigent.onboarding.setup_schema import SETUP_ACTION_ADAPTER, SetupDetectRequest
 
 
 @pytest.fixture(autouse=True)
@@ -66,7 +66,52 @@ def test_named_keys_keep_distinct_sources_and_vendor_endpoint(monkeypatch: pytes
     assert entries["openrouter"]["openai"]["models"]["default"] == "updated"
 
 
-def test_gateway_defaults_and_credential_update_preserve_advanced(tmp_path: Path):
+@pytest.mark.parametrize("model_input", [{}, {"model": None}])
+def test_key_without_model_uses_cli_catalog_default(
+    monkeypatch: pytest.MonkeyPatch, model_input: dict[str, object]
+):
+    from omnigent.onboarding import providers
+
+    requested = []
+
+    def default(provider: str) -> str:
+        requested.append(provider)
+        return "fixture-catalog-model"
+
+    monkeypatch.setattr(providers, "default_chat_model", default)
+    apply(action="add_key", provider="openai", secret="fixture-key", **model_input)
+    assert requested == ["openai"]
+    assert load_global_config()["providers"]["openai"]["openai"]["models"]["default"] == (
+        "fixture-catalog-model"
+    )
+
+
+def test_explicit_key_model_does_not_load_catalog(monkeypatch: pytest.MonkeyPatch):
+    from omnigent.onboarding import providers
+
+    monkeypatch.setattr(
+        providers, "default_chat_model", lambda _: pytest.fail("explicit model fetched catalog")
+    )
+    apply(action="add_key", provider="openai", secret="fixture-key", model="my-fixture-model")
+    assert load_global_config()["providers"]["openai"]["openai"]["models"]["default"] == (
+        "my-fixture-model"
+    )
+
+
+def test_missing_catalog_default_leaves_existing_config_and_secret_untouched(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    apply(action="add_key", provider="openai", secret="fixture-old", model="fixture-old-model")
+    before = (tmp_path / "config.yaml").read_bytes()
+    monkeypatch.setattr(
+        secrets, "store_secret", lambda *_: pytest.fail("secret written without a model")
+    )
+    with pytest.raises(ValueError, match="No default model is available"):
+        apply(action="add_key", provider="openai", secret="fixture-new")
+    assert (tmp_path / "config.yaml").read_bytes() == before
+
+
+def test_gateway_defaults_and_reconfiguration_preserve_advanced(tmp_path: Path):
     gateway()
     cfg = load_global_config()
     cfg["providers"]["gateway"]["openai"]["context_window"] = 200000
@@ -75,12 +120,7 @@ def test_gateway_defaults_and_credential_update_preserve_advanced(tmp_path: Path
     save_global_config(cfg)
     gateway("second")
     apply(action="set_default", name="second", surface="openai")
-    apply(
-        action="update_provider_credential",
-        name="gateway",
-        families=["openai"],
-        secret="NEW-SECRET",
-    )
+    gateway(secret="NEW-SECRET")
     cfg = load_global_config()
     assert cfg["providers"]["gateway"]["future_setting"] == {"keep": True}
     assert cfg["providers"]["gateway"]["openai"]["context_window"] == 200000
@@ -134,12 +174,109 @@ def test_passive_inventory_never_detects_resolves_or_fetches(monkeypatch: pytest
     assert service.get_setup_inventory().providers[0].name == "gateway"
 
 
+def test_explicit_harness_status_checks_only_requested_harness(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from omnigent.onboarding import harness_readiness, providers
+
+    checked: list[str] = []
+    monkeypatch.setattr(
+        harness_readiness,
+        "_harness_availability",
+        lambda harness: checked.append(harness) or "needs-auth",
+    )
+    monkeypatch.setattr(
+        harness_readiness,
+        "configured_harness_map",
+        lambda: pytest.fail("full readiness map was probed"),
+    )
+    monkeypatch.setattr(ambient, "detect_providers", lambda **_: pytest.fail("providers detected"))
+    monkeypatch.setattr(service, "_discover_imports", lambda *_: pytest.fail("imports discovered"))
+    monkeypatch.setattr(
+        providers, "get_chat_models", lambda *_: pytest.fail("model catalog loaded")
+    )
+
+    result = service.detect_setup_connections(
+        SetupDetectRequest(harness="antigravity-native", import_source="acpx")
+    )
+
+    assert checked == ["antigravity-native"]
+    assert result.harness_status is not None
+    assert result.harness_status.harness == "antigravity-native"
+    assert result.harness_status.availability == "needs-auth"
+    assert result.providers == []
+    assert result.imports == []
+    assert result.models == {}
+
+
+def test_explicit_harness_status_failure_has_no_success_verdict(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from omnigent.onboarding import harness_readiness
+
+    def failed_check(_harness: str) -> None:
+        raise RuntimeError("fixture private error")
+
+    monkeypatch.setattr(harness_readiness, "_harness_availability", failed_check)
+    result = service.detect_setup_connections(SetupDetectRequest(harness="opencode"))
+
+    assert result.harness_status is None
+    assert result.warnings == [
+        "The requested harness status could not be checked on this computer"
+    ]
+    assert "fixture private error" not in result.model_dump_json()
+
+
+def test_explicit_harness_status_rejects_unknown_harness():
+    with pytest.raises(ValueError):
+        SetupDetectRequest.model_validate({"harness": "arbitrary-command"})
+
+
+def test_builtin_acp_instructions_follow_cli_catalog_and_custom_shadowing():
+    from omnigent.acp_cli_harnesses import ACP_CLI_HARNESSES
+
+    inventory = service.get_setup_inventory()
+    assert {row.id for row in inventory.builtin_acp} == set(ACP_CLI_HARNESSES)
+    for row in inventory.builtin_acp:
+        spec = ACP_CLI_HARNESSES[row.id].install
+        assert row.label == spec.display
+        assert row.install_command == spec.install_hint
+        assert row.auth_instructions == spec.auth_hint
+    assert not load_global_config()
+
+    save_global_config({"acp": {"agents": [{"name": "Devin", "command": "fixture-devin --acp"}]}})
+    inventory = service.get_setup_inventory()
+    assert "devin" not in {row.id for row in inventory.builtin_acp}
+    assert inventory.acp_agents[0].slug == "devin"
+    assert load_global_config()["acp"]["agents"][0]["command"] == "fixture-devin --acp"
+
+
 def test_harness_keys_preserve_advanced_host_and_removal():
     save_global_config({"copilot": {"github_host": "enterprise.example", "future": 4}})
     apply(action="set_harness_key", harness="copilot", secret="fixture-token")
     apply(action="set_copilot_host", host="new.example")
     apply(action="remove_harness_key", harness="copilot")
     assert load_global_config()["copilot"] == {"github_host": "new.example", "future": 4}
+
+
+def test_gateway_reconfiguration_drops_deselected_families():
+    gateway(families=["anthropic", "openai"], models={"anthropic": "fixture", "openai": "fixture"})
+    gateway(families=["openai"])
+    raw = load_global_config()["providers"]["gateway"]
+    assert "anthropic" not in raw
+    inventory = service.get_setup_inventory()
+    assert set(inventory.providers[0].families) == {"openai", "pi"}
+    assert inventory.effective_defaults.get("anthropic") is None
+
+
+def test_standalone_credential_rotation_is_not_a_setup_action():
+    with pytest.raises(ValueError):
+        apply(
+            action="update_provider_credential",
+            name="gateway",
+            families=["openai"],
+            secret="fixture",
+        )
 
 
 def test_acp_edits_preserve_unknown_existing_fields():
@@ -198,7 +335,9 @@ def test_opencode_model_clear():
     assert "opencode_model" not in load_global_config()
 
 
-def test_failed_rotation_keeps_previous_secret_and_reference(monkeypatch: pytest.MonkeyPatch):
+def test_failed_reconfiguration_keeps_previous_secret_and_reference(
+    monkeypatch: pytest.MonkeyPatch,
+):
     gateway()
     before = load_global_config()
     old_ref = before["providers"]["gateway"]["openai"]["api_key_ref"]
@@ -209,17 +348,12 @@ def test_failed_rotation_keeps_previous_secret_and_reference(monkeypatch: pytest
         lambda *_a, **_kw: (_ for _ in ()).throw(OSError("fixture failure")),
     )
     with pytest.raises(OSError, match="fixture failure"):
-        apply(
-            action="update_provider_credential",
-            name="gateway",
-            families=["openai"],
-            secret="replacement",
-        )
+        gateway(secret="replacement")
     assert load_global_config() == before
     assert secrets.load_secret(old_ref.removeprefix("keychain:")) == old_secret
 
 
-def test_rotation_does_not_change_shared_sibling_credential():
+def test_reconfiguration_does_not_change_shared_sibling_credential():
     gateway()
     config = load_global_config()
     from copy import deepcopy
@@ -229,12 +363,7 @@ def test_rotation_does_not_change_shared_sibling_credential():
     config["providers"]["sibling"] = sibling
     save_global_config(config)
     old_ref = sibling["openai"]["api_key_ref"]
-    apply(
-        action="update_provider_credential",
-        name="gateway",
-        families=["openai"],
-        secret="replacement",
-    )
+    gateway(secret="replacement")
     assert load_global_config()["providers"]["sibling"]["openai"]["api_key_ref"] == old_ref
     assert secrets.load_secret(old_ref.removeprefix("keychain:")) == "TEST-SECRET"
 
@@ -398,7 +527,6 @@ def test_existing_unicode_provider_identifier_can_be_managed():
         }
     )
     apply(action="set_default", name=name, surface="openai")
-    apply(action="update_provider_credential", name=name, families=["openai"], secret="fixture")
     assert service.get_setup_inventory().effective_defaults["openai"] == name
     apply(action="remove_provider", name=name)
     assert service.get_setup_inventory().providers == []

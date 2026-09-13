@@ -24,6 +24,13 @@ and removal. Use a new state directory for each run. The standalone driver loads
 only this test module, avoiding unrelated repository conftests in its browser
 process.
 
+The agent-scoping regression uses the same clean environment and SPA build.
+Run `tests/e2e_ui/providers/run_scoping.py` with fresh `--state` and
+`--recordings` directories. It seeds only disposable host config with Claude
+and Codex subscription entries, then checks Pi compatibility, per-agent
+defaults, detection messages, rejected saves, and save/reload through the real
+host API. No vendor login is attempted.
+
 All application children boot through the helper's fail-closed guard. Their
 environment is built from scratch; `HOME` and `CODEX_HOME` are never repurposed.
 The guard blocks Keychain calls, ambient home access, non-fixture sockets, and

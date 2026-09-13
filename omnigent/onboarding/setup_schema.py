@@ -6,9 +6,28 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, TypeAdapter
 
+from omnigent.harness_availability import HarnessAvailability
+
 Family = Literal["anthropic", "openai", "gemini"]
 Surface = Literal["anthropic", "openai", "gemini", "pi"]
 HarnessKey = Literal["cursor", "antigravity", "copilot"]
+StatusHarness = Literal[
+    "claude-native",
+    "codex-native",
+    "cursor",
+    "cursor-native",
+    "opencode",
+    "opencode-native",
+    "pi-native",
+    "antigravity",
+    "antigravity-native",
+    "copilot",
+    "qwen",
+    "goose",
+    "hermes",
+    "kiro",
+    "kimi",
+]
 Name = Annotated[
     str, Field(min_length=1, max_length=160, pattern=r"^[A-Za-z0-9][A-Za-z0-9._ -]*$")
 ]
@@ -29,13 +48,7 @@ class AddKey(CredentialInput):
     action: Literal["add_key"]
     provider: Name
     name: Name | None = None
-    model: ModelId
-
-
-class UpdateProviderCredential(CredentialInput):
-    action: Literal["update_provider_credential"]
-    name: Identifier
-    families: list[Family] = Field(min_length=1, max_length=3)
+    model: ModelId | None = None
 
 
 class AddGateway(CredentialInput):
@@ -121,6 +134,7 @@ class RemoveAcp(SetupModel):
 class SetupDetectRequest(SetupModel):
     import_path: str | None = Field(default=None, max_length=4096)
     import_source: Literal["openclaw", "acpx"] | None = None
+    harness: StatusHarness | None = None
 
 
 class ImportAcp(SetupModel):
@@ -133,7 +147,6 @@ class ImportAcp(SetupModel):
 
 SetupAction = Annotated[
     AddKey
-    | UpdateProviderCredential
     | AddGateway
     | AddBedrock
     | Subscription
@@ -194,12 +207,20 @@ class HarnessSettings(SetupModel):
     opencode_model: str | None = None
 
 
+class BuiltinAcpSetup(SetupModel):
+    id: str
+    label: str
+    install_command: str
+    auth_instructions: str
+
+
 class SetupInventory(SetupModel):
     feature_enabled: bool = True
     supported_operations: list[str] = Field(default_factory=list)
     providers: list[SetupProvider] = Field(default_factory=list)
     key_providers: list[KeyProvider] = Field(default_factory=list)
     acp_agents: list[AcpAgent] = Field(default_factory=list)
+    builtin_acp: list[BuiltinAcpSetup] = Field(default_factory=list)
     harness_settings: HarnessSettings = Field(default_factory=HarnessSettings)
     dismissed_detections: list[str] = Field(default_factory=list)
     effective_defaults: dict[str, str | None] = Field(default_factory=dict)
@@ -223,12 +244,18 @@ class ImportPreview(SetupModel):
     fingerprint: str
 
 
+class HarnessStatus(SetupModel):
+    harness: StatusHarness
+    availability: HarnessAvailability
+
+
 class SetupDetection(SetupModel):
     providers: list[DetectedConnection] = Field(default_factory=list)
     imports: list[ImportPreview] = Field(default_factory=list)
     models: dict[str, list[str]] = Field(default_factory=dict)
     warnings: list[str] = Field(default_factory=list)
     default_models: dict[str, str | None] = Field(default_factory=dict)
+    harness_status: HarnessStatus | None = None
 
 
 class SetupActionResult(SetupModel):

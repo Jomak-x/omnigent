@@ -376,3 +376,53 @@ async def test_detection_forwards_typed_optional_custom_file(body):
     frame = await asyncio.wait_for(responder, timeout=2)
     assert frame.method == SetupMethod.DETECT
     assert frame.secret_payload == (body or {"import_path": None, "import_source": None})
+
+
+async def test_detection_forwards_explicit_harness_status_to_selected_host():
+    app, _, conn, store = make_app()
+    status = {
+        "harness_status": {"harness": "antigravity-native", "availability": "needs-auth"},
+        "warnings": [],
+    }
+    responder = asyncio.create_task(respond(conn, status))
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        result = await client.post(
+            "/v1/hosts/host-a/setup/detect",
+            headers={"x-user": "alice"},
+            json={"harness": "antigravity-native"},
+        )
+
+    frame = await asyncio.wait_for(responder, timeout=2)
+    assert result.status_code == 200
+    assert result.json() == status
+    assert frame.method == SetupMethod.DETECT
+    assert frame.secret_payload == {
+        "import_path": None,
+        "import_source": None,
+        "harness": "antigravity-native",
+    }
+    store.get_host.assert_called_once_with("host-a")
+
+
+@pytest.mark.parametrize(
+    ("options", "headers", "harness", "expected"),
+    [
+        ({"enabled": False}, {"x-user": "alice"}, "antigravity-native", 404),
+        ({}, {}, "antigravity-native", 401),
+        ({}, {"x-user": "bob"}, "antigravity-native", 403),
+        ({}, {"x-user": "alice"}, "arbitrary-command", 422),
+    ],
+)
+async def test_explicit_harness_status_rejections_do_not_reach_host(
+    options, headers, harness, expected
+):
+    app, _, conn, _ = make_app(**options)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        result = await client.post(
+            "/v1/hosts/host-a/setup/detect",
+            headers=headers,
+            json={"harness": harness},
+        )
+    assert result.status_code == expected
+    assert conn.outbound_queue.empty()

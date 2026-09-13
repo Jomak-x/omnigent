@@ -126,15 +126,30 @@ def _merge_fields(old: dict[str, object], new: dict[str, object]) -> dict[str, o
 
 
 def provider_add_settings(
-    config: dict[str, object], name: str, entry: dict[str, object], *, surface: str | None = None
+    config: dict[str, object],
+    name: str,
+    entry: dict[str, object],
+    *,
+    surface: str | None = None,
+    preserve_advanced: bool = False,
 ) -> tuple[dict[str, object], list[str]]:
-    """Preserve advanced fields and default only currently unresolved surfaces."""
+    """Build setup's replacement, optionally preserving fields absent from UI forms."""
     block = config.get("providers")
     providers = deepcopy(block) if isinstance(block, dict) else {}
     old = providers.get(name)
+    if preserve_advanced and isinstance(old, dict):
+        removed = {key for key in ("anthropic", "openai", "gemini") if key not in entry}
+        old = {key: value for key, value in old.items() if key not in removed}
+        default = old.get("default")
+        if isinstance(default, list):
+            old["default"] = [scope for scope in default if scope not in removed]
+            if not old["default"]:
+                old.pop("default")
+        elif isinstance(default, str) and default in removed:
+            old.pop("default")
     providers[name] = (
         _merge_fields(old, entry)
-        if isinstance(old, dict) and old.get("kind") == entry.get("kind")
+        if preserve_advanced and isinstance(old, dict) and old.get("kind") == entry.get("kind")
         else entry
     )
     updated = {**config, "providers": providers}
@@ -258,19 +273,8 @@ def store_staged_secret(ref: str, secret: str) -> None:
 
 
 def store_setup_credential(name: str, secret: str) -> str:
-    """Stage a pasted CLI credential without replacing any active secret slot."""
-    config = load_setup_config()
+    """Store a CLI credential under its established setup slot name."""
     ref = f"keychain:{name}"
-
-    def referenced(value: object) -> bool:
-        if isinstance(value, dict):
-            return any(referenced(item) for item in value.values())
-        if isinstance(value, list):
-            return any(referenced(item) for item in value)
-        return value == ref
-
-    if referenced(config):
-        ref = staged_secret_ref(name)
     store_staged_secret(ref, secret)
     return ref
 

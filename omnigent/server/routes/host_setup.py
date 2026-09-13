@@ -163,9 +163,10 @@ def create_host_setup_router(
             body = SetupDetectRequest.model_validate(await _body(request, allow_empty=True))
         except ValueError:
             raise HTTPException(422, "invalid setup detection request") from None
-        return await proxy_setup(
-            host_registry, conn, SetupMethod.DETECT, payload=_wire_model(body)
-        )
+        payload = _wire_model(body)
+        if body.harness is None:
+            payload.pop("harness", None)
+        return await proxy_setup(host_registry, conn, SetupMethod.DETECT, payload=payload)
 
     @router.post("/hosts/{host_id}/setup-operations")
     async def start(request: Request, host_id: str) -> dict[str, Any]:

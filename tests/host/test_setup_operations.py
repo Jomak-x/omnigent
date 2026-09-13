@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 import omnigent.host.setup_operations as operations
+import omnigent.terminals.control_bridge as control_bridge
 from omnigent.host.setup_operations import (
     SetupOperationAction,
     SetupOperationError,
@@ -90,6 +91,75 @@ class _Harness:
         self.persisted.append(action)
 
 
+@pytest.mark.asyncio
+async def test_current_screen_seed_drops_unused_rows_before_cursor_restore(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capture = b"FIXTURE ONLY\nDevice code: TEST-1234\nInput: \n\n   \n\n"
+    metadata = control_bridge._PaneMetadata(
+        cursor_x=7,
+        cursor_y=2,
+        cursor_visible=True,
+        alternate_on=False,
+    )
+
+    async def fake_metadata(
+        _tmux: str,
+        _socket_path: str,
+        _tmux_target: str,
+    ) -> control_bridge._PaneMetadata:
+        return metadata
+
+    class FakeCaptureProcess:
+        returncode = 0
+
+        async def communicate(self) -> tuple[bytes, None]:
+            return capture, None
+
+    spawn_args: list[tuple[object, ...]] = []
+
+    async def fake_spawn(*args: object, **_kwargs: object) -> FakeCaptureProcess:
+        spawn_args.append(args)
+        return FakeCaptureProcess()
+
+    monkeypatch.setattr(control_bridge.shutil, "which", lambda _name: "/fixture/bin/tmux")
+    monkeypatch.setattr(control_bridge, "_capture_pane_metadata", fake_metadata)
+    monkeypatch.setattr(control_bridge.asyncio, "create_subprocess_exec", fake_spawn)
+
+    seed = await control_bridge._run_tmux_capture(
+        "/fixture/tmux.sock",
+        "main",
+        include_scrollback=False,
+    )
+
+    assert seed == (
+        b"\x1b[H\x1b[2JFIXTURE ONLY\r\nDevice code: TEST-1234\r\nInput: \x1b[3;8H\x1b[?25h"
+    )
+
+    scrollback_seed = await control_bridge._run_tmux_capture(
+        "/fixture/tmux.sock",
+        "main",
+        include_scrollback=True,
+    )
+
+    assert scrollback_seed == (
+        b"\x1b[H\x1b[2JFIXTURE ONLY\r\nDevice code: TEST-1234\r\n"
+        b"Input: \r\n\r\n   \r\n\x1b[3;8H\x1b[?25h"
+    )
+    base_args = (
+        "/fixture/bin/tmux",
+        "-S",
+        "/fixture/tmux.sock",
+        "capture-pane",
+        "-e",
+        "-p",
+        "-J",
+        "-t",
+        "main",
+    )
+    assert spawn_args == [base_args, (*base_args, "-S", "-")]
+
+
 async def _wait_for_state(
     manager: SetupOperationManager,
     operation_id: str,
@@ -107,9 +177,7 @@ async def _wait_for_state(
     ("action", "executable", "args"),
     [
         ("claude-login", "claude", ("auth", "login", "--claudeai")),
-        ("claude-logout", "claude", ("auth", "logout")),
         ("codex-login", "codex", ("login",)),
-        ("codex-logout", "codex", ("logout",)),
         ("cursor-login", "cursor-agent", ("login",)),
         ("cursor-logout", "cursor-agent", ("logout",)),
         ("antigravity-login", "agy", ()),
@@ -171,6 +239,8 @@ async def test_databricks_parameters_are_normalized_and_closed_over() -> None:
 @pytest.mark.parametrize(
     "request_body",
     [
+        {"action": "claude-logout"},
+        {"action": "codex-logout"},
         {"action": "codex-login", "parameters": {"argv": ["sh"]}},
         {
             "action": "databricks-configure",
@@ -223,7 +293,6 @@ def test_supported_actions_only_reports_available_fixed_workflows() -> None:
 
     assert manager.supported_actions() == (
         SetupOperationAction.CODEX_LOGIN,
-        SetupOperationAction.CODEX_LOGOUT,
         SetupOperationAction.DATABRICKS_CONFIGURE,
     )
 
@@ -410,7 +479,6 @@ async def test_attach_uses_live_only_bridge_and_detach_does_not_stop_process(
     output_events: list[dict[str, object]] = []
 
     async def fake_bridge(websocket: object, **kwargs: object) -> None:
-        assert kwargs["seed_output"] is True
         assert kwargs["seed_scrollback"] is False
         await websocket.send_bytes(b"pre-attach prompt")  # type: ignore[attr-defined]
         while True:

@@ -123,4 +123,28 @@ describe("ProviderSetupTerminal", () => {
     ).toBeInTheDocument();
     expect(screen.queryByText(/success/i)).toBeNull();
   });
+
+  it("keeps completed output visible without offering a retry after the bridge closes", async () => {
+    const onFinished = vi.fn();
+    render(
+      <ProviderSetupTerminal
+        hostId="host_a"
+        operation={{ ...runningOperation, state: "succeeded", exit_code: 0 }}
+        onOperationChange={vi.fn()}
+        onFinished={onFinished}
+      />,
+    );
+
+    expect(
+      screen.getByText(
+        "The guided command exited. Review the local provider status below for any saved changes.",
+      ),
+    ).toBeInTheDocument();
+    await waitFor(() => expect(sessions).toHaveLength(1));
+    act(() => sessions[0].onState({ kind: "closed", code: 1000, reason: "" }));
+
+    expect(screen.queryByRole("button", { name: "Retry terminal" })).toBeNull();
+    expect(screen.queryByText(/Terminal bridge closed/i)).toBeNull();
+    expect(onFinished).toHaveBeenCalledOnce();
+  });
 });

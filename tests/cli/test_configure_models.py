@@ -342,6 +342,8 @@ def test_configure_models_readd_key_does_not_drop_default(isolated_config) -> No
     # The re-added entry carries a default (the catalog's), not a missing one.
     assert "models" in entry["anthropic"], "re-add dropped the models block"
     assert entry["anthropic"]["models"]["default"] == default_chat_model("anthropic")
+    assert entry["anthropic"]["api_key_ref"] == "keychain:anthropic"
+    assert secrets.load_secret("anthropic") == "sk-ant-new-key"
 
 
 def test_configure_models_add_gateway_openrouter_chat_wire(isolated_config) -> None:

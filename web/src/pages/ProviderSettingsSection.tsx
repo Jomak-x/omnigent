@@ -1,7 +1,9 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangleIcon,
+  ArrowLeftIcon,
+  ChevronRightIcon,
   ChevronDownIcon,
   CloudIcon,
   KeyRoundIcon,
@@ -14,6 +16,12 @@ import {
 } from "lucide-react";
 
 import { ProviderSetupTerminal } from "@/components/ProviderSetupTerminal";
+import { iconForAgent } from "@/components/AgentCard";
+import { ClaudeIcon } from "@/components/icons/ClaudeIcon";
+import { CodexIcon } from "@/components/icons/CodexIcon";
+import { CursorIcon } from "@/components/icons/CursorIcon";
+import { OpenCodeIcon } from "@/components/icons/OpenCodeIcon";
+import { PiIcon } from "@/components/icons/PiIcon";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -25,11 +33,12 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
-import { useHosts, type Host } from "@/hooks/useHosts";
+import { useHosts, useInstallHarness, type Host } from "@/hooks/useHosts";
 import { isFeatureEnabled } from "@/lib/capabilities";
 import { useServerInfo } from "@/lib/CapabilitiesContext";
 import {
   detectSetup,
+  fetchSetupOperation,
   fetchSetupInventory,
   runSetupAction,
   startSetupOperation,
@@ -43,14 +52,17 @@ import {
   type SetupOperation,
   type SetupOperationAction,
   type SetupProvider,
-  type ProviderFamily,
   type ProviderSurface,
+  type SetupHarnessStatus,
+  type SetupStatusHarness,
 } from "@/lib/providerSetupApi";
-import { HarnessSetupDialog } from "@/shell/HarnessSetupDialog";
+import { useHarnessSetupSteps } from "@/lib/agentLabels";
+import { harnessInstallableOnHost, resolveSetupSteps } from "@/lib/harnessSetup";
 import { cn } from "@/lib/utils";
 
 const REMEMBERED_HOST_KEY = "omnigent:provider-settings-host";
 const REMEMBERED_HOST_NAME_KEY = `${REMEMBERED_HOST_KEY}:name`;
+const SETUP_OPERATION_KEY_PREFIX = "omnigent:provider-setup-operation:";
 
 const SETUP_LABELS: Record<string, string> = {
   anthropic: "Anthropic",
@@ -92,6 +104,47 @@ function rememberHost(hostId: string, name: string): void {
   }
 }
 
+function setupOperationStorageKey(hostId: string): string {
+  return `${SETUP_OPERATION_KEY_PREFIX}${hostId}`;
+}
+
+function setupOperationAgentKey(hostId: string): string {
+  return `${setupOperationStorageKey(hostId)}:agent`;
+}
+
+function readSetupOperationAgent(hostId: string): string | null {
+  try {
+    return sessionStorage.getItem(setupOperationAgentKey(hostId));
+  } catch {
+    return null;
+  }
+}
+
+function readSetupOperationId(hostId: string): string | null {
+  try {
+    return sessionStorage.getItem(setupOperationStorageKey(hostId));
+  } catch {
+    return null;
+  }
+}
+
+function rememberSetupOperation(hostId: string, operationId: string): void {
+  try {
+    sessionStorage.setItem(setupOperationStorageKey(hostId), operationId);
+  } catch {
+    // The mounted page still retains the operation when storage is unavailable.
+  }
+}
+
+function forgetSetupOperation(hostId: string): void {
+  try {
+    sessionStorage.removeItem(setupOperationStorageKey(hostId));
+    sessionStorage.removeItem(setupOperationAgentKey(hostId));
+  } catch {
+    // Storage can be unavailable in privacy-restricted embeds.
+  }
+}
+
 export function ProviderSettingsSection() {
   const hostsQuery = useHosts({ refetchOnFocus: true });
   const hosts = hostsQuery.data;
@@ -120,14 +173,11 @@ export function ProviderSettingsSection() {
       <p className="mt-1 text-ui text-muted-foreground">
         Configure model providers and coding-agent authentication on a computer.
       </p>
-      <div className="mt-6 flex flex-col gap-5">
-        <div className="rounded-xl border border-border bg-card p-4">
+      <div className="mt-5 flex flex-col gap-4">
+        <div className="border-b border-border pb-4">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
               <h2 className="text-ui font-medium">Computer</h2>
-              <p className="text-sm text-muted-foreground">
-                Provider settings stay on the computer that runs your agents.
-              </p>
             </div>
             {hosts && hosts.length > 0 && (
               <Select
@@ -245,6 +295,9 @@ function ProviderHostSettings({ host }: { host: Host }) {
   const detectionMutation = useMutation({
     mutationFn: (request?: SetupDetectRequest) => detectSetup(host.host_id, request),
   });
+  const statusMutation = useMutation({
+    mutationFn: (harness: SetupStatusHarness) => detectSetup(host.host_id, { harness }),
+  });
   const operationMutation = useMutation({
     mutationFn: ({
       action,
@@ -258,14 +311,99 @@ function ProviderHostSettings({ host }: { host: Host }) {
   const [error, setError] = useState<string | null>(null);
   const [detection, setDetection] = useState<SetupDetection | null>(null);
   const [detectionRequest, setDetectionRequest] = useState<SetupDetectRequest | null>(null);
+  const [checkedStatuses, setCheckedStatuses] = useState<
+    Partial<Record<SetupStatusHarness, SetupHarnessStatus>>
+  >({});
+  const [statusErrors, setStatusErrors] = useState<Partial<Record<SetupStatusHarness, string>>>({});
+  const [checkingHarness, setCheckingHarness] = useState<SetupStatusHarness | null>(null);
   const [operation, setOperation] = useState<SetupOperation | null>(null);
+  const [operationAgentId, setOperationAgentId] = useState<string | null>(null);
+  const [operationRecoveryPending, setOperationRecoveryPending] = useState(
+    () => readSetupOperationId(host.host_id) !== null,
+  );
+  const [operationRecoveryError, setOperationRecoveryError] = useState<string | null>(null);
+  const [operationRecoveryAttempt, setOperationRecoveryAttempt] = useState(0);
+  const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
+  const operationPanelRef = useRef<HTMLDivElement | null>(null);
+  const operationToRevealRef = useRef<string | null>(null);
 
   const inventory = inventoryQuery.data;
   const serverGate = isFeatureEnabled(info, "harness_install");
   const canMutate = !!inventory && inventory.mutations_enabled !== false && serverGate;
-  const busy = actionMutation.isPending || operationMutation.isPending;
+  const operationActive = operation?.state === "pending" || operation?.state === "running";
+  const operationId = operation?.operation_id;
+  const busy =
+    actionMutation.isPending ||
+    operationMutation.isPending ||
+    statusMutation.isPending ||
+    operationActive ||
+    operationRecoveryPending ||
+    operationRecoveryError !== null;
+
+  useEffect(() => {
+    const rememberedOperationId = readSetupOperationId(host.host_id);
+    if (!rememberedOperationId) {
+      setOperationRecoveryPending(false);
+      setOperationRecoveryError(null);
+      return;
+    }
+    const controller = new AbortController();
+    let disposed = false;
+    setOperationRecoveryPending(true);
+    setOperationRecoveryError(null);
+    void fetchSetupOperation(host.host_id, rememberedOperationId, controller.signal)
+      .then((recovered) => {
+        if (disposed) return;
+        if (recovered.state === "pending" || recovered.state === "running") {
+          setOperation(recovered);
+          const recoveredAgentId =
+            recovered.action === "databricks-configure"
+              ? readSetupOperationAgent(host.host_id)
+              : agentIdForOperation(recovered.action);
+          setOperationAgentId(recoveredAgentId);
+          setSelectedAgentId(recoveredAgentId);
+        } else {
+          forgetSetupOperation(host.host_id);
+        }
+      })
+      .catch((reason: unknown) => {
+        if (disposed || controller.signal.aborted) return;
+        if (reason instanceof Error && "status" in reason && reason.status === 404) {
+          forgetSetupOperation(host.host_id);
+          return;
+        }
+        setOperationRecoveryError(
+          reason instanceof Error ? reason.message : "The previous setup operation is unavailable.",
+        );
+      })
+      .finally(() => {
+        if (!disposed) setOperationRecoveryPending(false);
+      });
+    return () => {
+      disposed = true;
+      controller.abort();
+    };
+  }, [host.host_id, operationRecoveryAttempt]);
+
+  useEffect(() => {
+    if (!operationId || operationToRevealRef.current !== operationId) return;
+    operationToRevealRef.current = null;
+    operationPanelRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }, [operationId]);
+
+  const updateOperation = (next: SetupOperation) => {
+    setOperation(next);
+    if (next.state === "pending" || next.state === "running") {
+      rememberSetupOperation(host.host_id, next.operation_id);
+    } else {
+      forgetSetupOperation(host.host_id);
+    }
+  };
 
   const act = async (action: SetupAction): Promise<boolean> => {
+    if (operationActive || operationRecoveryPending || operationRecoveryError) return false;
+    setCheckedStatuses({});
+    setStatusErrors({});
     setError(null);
     setNotice(null);
     try {
@@ -282,6 +420,7 @@ function ProviderHostSettings({ host }: { host: Host }) {
   };
 
   const detect = async (request?: SetupDetectRequest) => {
+    if (operationActive || operationRecoveryPending || operationRecoveryError) return;
     setError(null);
     setNotice(null);
     try {
@@ -292,14 +431,56 @@ function ProviderHostSettings({ host }: { host: Host }) {
     }
   };
 
+  const checkStatus = async (harness: SetupStatusHarness) => {
+    if (busy) return;
+    setCheckedStatuses((statuses) => ({ ...statuses, [harness]: undefined }));
+    setStatusErrors((errors) => ({ ...errors, [harness]: undefined }));
+    setCheckingHarness(harness);
+    try {
+      const result = await statusMutation.mutateAsync(harness);
+      if (result.harness_status?.harness === harness) {
+        setCheckedStatuses((statuses) => ({ ...statuses, [harness]: result.harness_status }));
+        void inventoryQuery.refetch();
+      } else {
+        setStatusErrors((errors) => ({
+          ...errors,
+          [harness]:
+            result.warnings?.join(" ") || "Setup status could not be checked on this computer.",
+        }));
+      }
+    } catch (reason) {
+      setStatusErrors((errors) => ({
+        ...errors,
+        [harness]: reason instanceof Error ? reason.message : "Setup status could not be checked.",
+      }));
+    } finally {
+      setCheckingHarness(null);
+    }
+  };
+
   const start = async (
     action: SetupOperationAction,
     parameters: Record<string, unknown> = {},
+    originatingAgent?: string,
   ): Promise<boolean> => {
+    if (operationActive || operationRecoveryPending || operationRecoveryError) return false;
+    setCheckedStatuses({});
+    setStatusErrors({});
     setError(null);
     setNotice(null);
     try {
-      setOperation(await operationMutation.mutateAsync({ action, parameters }));
+      const started = await operationMutation.mutateAsync({ action, parameters });
+      operationToRevealRef.current = started.operation_id;
+      updateOperation(started);
+      setOperationAgentId(originatingAgent ?? agentIdForOperation(started.action));
+      if (started.action === "databricks-configure" && originatingAgent) {
+        try {
+          sessionStorage.setItem(setupOperationAgentKey(host.host_id), originatingAgent);
+        } catch {
+          // The active page still keeps the originating agent.
+        }
+      }
+      setSelectedAgentId(originatingAgent ?? agentIdForOperation(started.action));
       return true;
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "The guided setup could not start.");
@@ -346,44 +527,61 @@ function ProviderHostSettings({ host }: { host: Host }) {
         </div>
       )}
       {error && <InlineError message={error} />}
-      {operation && (
-        <ProviderSetupTerminal
-          hostId={host.host_id}
-          operation={operation}
-          onOperationChange={setOperation}
-          onFinished={() => {
-            void inventoryQuery.refetch();
-            void queryClient.invalidateQueries({ queryKey: ["hosts"] });
-          }}
+      {operationRecoveryPending && (
+        <div
+          role="status"
+          className="flex items-center gap-2 rounded-lg border border-border bg-muted/30 px-3 py-2 text-sm text-muted-foreground"
+        >
+          <Loader2Icon className="size-4 animate-spin" aria-hidden="true" />
+          Restoring setup operation…
+        </div>
+      )}
+      {operationRecoveryError && (
+        <InlineError
+          message={`The previous setup operation could not be restored: ${operationRecoveryError}`}
+          onRetry={() => setOperationRecoveryAttempt((attempt) => attempt + 1)}
         />
       )}
-
-      <ProviderOverview
+      {operation?.action === "databricks-configure" && !operationAgentId && (
+        <div ref={operationPanelRef} className="rounded-xl border border-border bg-card p-4">
+          <ProviderSetupTerminal
+            hostId={host.host_id}
+            operation={operation}
+            title="Configure Databricks"
+            onOperationChange={updateOperation}
+            onFinished={() => {
+              void inventoryQuery.refetch();
+              void queryClient.invalidateQueries({ queryKey: ["hosts"] });
+            }}
+          />
+        </div>
+      )}
+      <AgentSettings
+        host={host}
         inventory={inventory}
         canMutate={canMutate}
         busy={busy}
         detection={detection}
         detecting={detectionMutation.isPending}
         onDetect={() => void detect()}
-        onAction={act}
-      />
-      <ProviderForms
-        inventory={inventory}
-        detection={detection}
-        canMutate={canMutate}
-        busy={busy}
-        onAction={act}
-      />
-      <HarnessSettings
-        host={host}
-        inventory={inventory}
-        canMutate={canMutate}
-        busy={busy}
-        detection={detection}
+        checkedStatuses={checkedStatuses}
+        statusErrors={statusErrors}
+        checkingHarness={checkingHarness}
+        onCheckStatus={(harness) => void checkStatus(harness)}
         onAction={act}
         onStart={start}
+        selectedAgentId={selectedAgentId}
+        onSelectAgent={setSelectedAgentId}
+        operation={operation}
+        operationAgentId={operationAgentId}
+        operationPanelRef={operationPanelRef}
+        onOperationChange={updateOperation}
+        onOperationFinished={() => {
+          void inventoryQuery.refetch();
+          void queryClient.invalidateQueries({ queryKey: ["hosts"] });
+        }}
       />
-      <AdvancedSettings
+      <AdvancedProviderTools
         inventory={inventory}
         detection={detection}
         detectionRequest={detectionRequest}
@@ -392,6 +590,7 @@ function ProviderHostSettings({ host }: { host: Host }) {
         onAction={act}
         onDetectImport={(request) => void detect(request)}
         detecting={detectionMutation.isPending}
+        onDetect={() => void detect()}
       />
     </div>
   );
@@ -441,10 +640,37 @@ function providerSurfaces(provider: SetupProvider): ProviderSurface[] {
   const surfaces = raw.filter((surface): surface is ProviderSurface =>
     ["anthropic", "openai", "gemini", "pi"].includes(surface),
   );
-  if (provider.families.some((family) => family === "anthropic" || family === "openai")) {
+  if (
+    !provider.default_scopes?.length &&
+    ["key", "api_key", "gateway", "local"].includes(provider.kind) &&
+    provider.families.some((family) => family === "anthropic" || family === "openai")
+  ) {
     surfaces.push("pi");
   }
   return [...new Set(surfaces)];
+}
+
+const CLAUDE_KEYCHAIN_DETECTION_NOTICE =
+  "Claude logins stored only in the OS Keychain are checked through guided sign-in, not detection.";
+
+function primarySurfaceForAgent(agent: AgentOption): ProviderSurface | undefined {
+  return agent.id === "pi" ? "pi" : agent.surfaces[0];
+}
+
+function providerMatchesAgent(provider: SetupProvider, agent: AgentOption): boolean {
+  const surface = primarySurfaceForAgent(agent);
+  return !!surface && providerSurfaces(provider).includes(surface);
+}
+
+function detectedProviderMatchesAgent(
+  provider: SetupDetection["providers"][number],
+  agent: AgentOption,
+): boolean {
+  if (agent.id === "pi") {
+    if (provider.kind === "subscription") return provider.family === "pi";
+    if (provider.kind === "bedrock") return false;
+  }
+  return agent.surfaces.includes(provider.family as ProviderSurface);
 }
 
 function ProviderOverview({
@@ -482,6 +708,7 @@ function ProviderOverview({
             variant="outline"
             size="sm"
             loading={detecting}
+            disabled={busy}
             data-testid="settings-provider-detect"
             onClick={onDetect}
           >
@@ -504,7 +731,6 @@ function ProviderOverview({
                 void onAction({ action: "set_default", name: provider.name, surface })
               }
               onRemove={() => setRemoving(provider)}
-              onAction={onAction}
             />
           ))}
         </div>
@@ -541,7 +767,6 @@ function ProviderRow({
   busy,
   onDefault,
   onRemove,
-  onAction,
 }: {
   provider: SetupProvider;
   effectiveDefaults: Record<string, string | null>;
@@ -549,16 +774,9 @@ function ProviderRow({
   busy: boolean;
   onDefault: (surface: ProviderSurface) => void;
   onRemove: () => void;
-  onAction: (action: SetupAction) => Promise<boolean>;
 }) {
   const surfaces = providerSurfaces(provider);
   const [surface, setSurface] = useState<ProviderSurface>(surfaces[0] ?? "openai");
-  const [credentialOpen, setCredentialOpen] = useState(false);
-  const [secret, setSecret] = useState("");
-  const [envVar, setEnvVar] = useState("");
-  const credentialFamilies = provider.families.filter((family): family is ProviderFamily =>
-    ["anthropic", "openai", "gemini"].includes(family),
-  );
   const effective = Object.entries(effectiveDefaults)
     .filter(([, name]) => name === provider.name)
     .map(([scope]) => scope);
@@ -640,62 +858,9 @@ function ProviderRow({
             <Button type="button" variant="ghost" size="sm" disabled={busy} onClick={onRemove}>
               <Trash2Icon className="size-4" /> Remove
             </Button>
-            {credentialFamilies.length > 0 && (
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                disabled={busy}
-                onClick={() => setCredentialOpen((open) => !open)}
-              >
-                Update credential
-              </Button>
-            )}
           </div>
         )}
       </div>
-      {credentialOpen && canMutate && (
-        <form
-          className="flex flex-col gap-3 rounded-lg border bg-muted/20 p-3"
-          onSubmit={async (event) => {
-            event.preventDefault();
-            if (!(secret.trim() || envVar.trim())) return;
-            if (
-              await onAction({
-                action: "update_provider_credential",
-                name: provider.name,
-                families: credentialFamilies,
-                ...credentialPayload(secret, envVar),
-              })
-            ) {
-              setSecret("");
-              setEnvVar("");
-              setCredentialOpen(false);
-            }
-          }}
-        >
-          <SecretOrEnvironment
-            secret={secret}
-            envVar={envVar}
-            onSecret={setSecret}
-            onEnvVar={setEnvVar}
-          />
-          <p className="text-xs text-muted-foreground">
-            Only the credential source changes. Models, endpoints, defaults, and advanced fields
-            stay intact.
-          </p>
-          <div>
-            <Button
-              type="submit"
-              size="sm"
-              loading={busy}
-              disabled={!(secret.trim() || envVar.trim())}
-            >
-              Save credential
-            </Button>
-          </div>
-        </form>
-      )}
     </div>
   );
 }
@@ -867,6 +1032,7 @@ function ProviderForms({
         <Button
           type="button"
           variant={open === "key" ? "secondary" : "outline"}
+          disabled={busy}
           onClick={() => setOpen(open === "key" ? null : "key")}
         >
           <KeyRoundIcon className="size-4" /> Add provider
@@ -874,6 +1040,7 @@ function ProviderForms({
         <Button
           type="button"
           variant={open === "gateway" ? "secondary" : "outline"}
+          disabled={busy}
           onClick={() => setOpen(open === "gateway" ? null : "gateway")}
         >
           <CloudIcon className="size-4" /> Add gateway
@@ -881,6 +1048,7 @@ function ProviderForms({
         <Button
           type="button"
           variant={open === "bedrock" ? "secondary" : "outline"}
+          disabled={busy}
           onClick={() => setOpen(open === "bedrock" ? null : "bedrock")}
         >
           <ServerCogIcon className="size-4" /> Add Bedrock
@@ -966,7 +1134,15 @@ function KeyProviderForm({
   const [model, setModel] = useState(defaultModels[catalog[0]?.id ?? ""] ?? "");
   const [secret, setSecret] = useState("");
   const [envVar, setEnvVar] = useState("");
-  const valid = provider && model.trim() && (secret.trim() || envVar.trim());
+  const [more, setMore] = useState(false);
+  const valid = provider && (secret.trim() || envVar.trim());
+  if (catalog.length === 0) {
+    return (
+      <p className="text-sm text-muted-foreground">
+        This computer does not offer a compatible API-key provider.
+      </p>
+    );
+  }
   return (
     <form
       className="flex flex-col gap-3"
@@ -978,7 +1154,7 @@ function KeyProviderForm({
             action: "add_key",
             provider,
             name: name.trim() || undefined,
-            model: model.trim(),
+            ...(model.trim() ? { model: model.trim() } : {}),
             ...credentialPayload(secret, envVar),
           })
         ) {
@@ -988,7 +1164,7 @@ function KeyProviderForm({
         }
       }}
     >
-      <div className="grid gap-3 sm:grid-cols-3">
+      <div className="grid gap-3 sm:grid-cols-2">
         <label className="flex flex-col gap-1 text-sm font-medium">
           Vendor
           <Select
@@ -1011,33 +1187,52 @@ function KeyProviderForm({
           </Select>
         </label>
         <label className="flex flex-col gap-1 text-sm font-medium">
-          Connection name
+          API key
           <Input
-            value={name}
-            onChange={(event) => setName(event.target.value)}
-            placeholder="Optional custom name"
-          />
-        </label>
-        <label className="flex flex-col gap-1 text-sm font-medium">
-          Default model
-          <Input
-            required
-            value={model}
-            onChange={(event) => setModel(event.target.value)}
-            placeholder="Required model ID"
+            type="password"
+            autoComplete="off"
+            value={secret}
+            onChange={(event) => setSecret(event.target.value)}
+            placeholder="Stored securely on this computer"
           />
         </label>
       </div>
-      <SecretOrEnvironment
-        secret={secret}
-        envVar={envVar}
-        onSecret={setSecret}
-        onEnvVar={setEnvVar}
-      />
-      <p className="text-xs text-muted-foreground">
-        Using an existing connection name updates its credential while preserving compatible
-        advanced settings.
-      </p>
+      <button
+        type="button"
+        className="self-start text-sm text-muted-foreground hover:text-foreground"
+        onClick={() => setMore(!more)}
+        aria-expanded={more}
+      >
+        More options
+      </button>
+      {more && (
+        <div className="grid gap-3 rounded-lg border bg-muted/20 p-3 sm:grid-cols-3">
+          <label className="flex flex-col gap-1 text-sm font-medium">
+            Connection name
+            <Input
+              value={name}
+              onChange={(event) => setName(event.target.value)}
+              placeholder="Optional"
+            />
+          </label>
+          <label className="flex flex-col gap-1 text-sm font-medium">
+            Default model
+            <Input
+              value={model}
+              onChange={(event) => setModel(event.target.value)}
+              placeholder="Automatic (omni setup default)"
+            />
+          </label>
+          <label className="flex flex-col gap-1 text-sm font-medium">
+            Environment variable instead of key
+            <Input
+              value={envVar}
+              onChange={(event) => setEnvVar(event.target.value)}
+              placeholder="OPENAI_API_KEY"
+            />
+          </label>
+        </div>
+      )}
       <div>
         <Button type="submit" loading={busy} disabled={!valid}>
           Save provider
@@ -1048,10 +1243,12 @@ function KeyProviderForm({
 }
 
 function GatewayForm({
+  initialFamily,
   busy,
   onAction,
   onDone,
 }: {
+  initialFamily?: "anthropic" | "openai";
   busy: boolean;
   onAction: (action: SetupAction) => Promise<boolean>;
   onDone: () => void;
@@ -1060,8 +1257,8 @@ function GatewayForm({
   const [url, setUrl] = useState("");
   const [secret, setSecret] = useState("");
   const [envVar, setEnvVar] = useState("");
-  const [anthropic, setAnthropic] = useState(true);
-  const [openai, setOpenai] = useState(true);
+  const [anthropic, setAnthropic] = useState(initialFamily !== "openai");
+  const [openai, setOpenai] = useState(initialFamily !== "anthropic");
   const [wire, setWire] = useState<"chat" | "responses">("responses");
   const [anthropicModel, setAnthropicModel] = useState("");
   const [openaiModel, setOpenaiModel] = useState("");
@@ -1242,13 +1439,13 @@ function BedrockForm({
 }
 
 const GUIDED_HARNESSES: {
-  id: string;
+  id: SetupStatusHarness;
   label: string;
   action?: SetupOperationAction;
   logout?: SetupOperationAction;
 }[] = [
-  { id: "claude-native", label: "Claude Code", action: "claude-login", logout: "claude-logout" },
-  { id: "codex-native", label: "Codex", action: "codex-login", logout: "codex-logout" },
+  { id: "claude-native", label: "Claude Code", action: "claude-login" },
+  { id: "codex-native", label: "Codex", action: "codex-login" },
   { id: "pi-native", label: "Pi" },
   { id: "cursor", label: "Cursor", action: "cursor-login", logout: "cursor-logout" },
   { id: "antigravity", label: "Antigravity", action: "antigravity-login" },
@@ -1275,177 +1472,874 @@ function operationAvailable(
   return status !== false;
 }
 
-function guidedActionLabel(action: SetupOperationAction): string {
-  return action.endsWith("-login") ? "Sign in" : "Configure";
+interface AgentOption {
+  id: string;
+  label: string;
+  harness: SetupStatusHarness;
+  surfaces: ProviderSurface[];
+  login?: SetupOperationAction;
+  logout?: SetupOperationAction;
+  icon: React.ComponentType<{ className?: string }>;
 }
 
-function HarnessSettings({
+const AGENT_OPTIONS: AgentOption[] = [
+  {
+    id: "claude",
+    label: "Claude Code",
+    harness: "claude-native",
+    surfaces: ["anthropic"],
+    login: "claude-login",
+    icon: ClaudeIcon,
+  },
+  {
+    id: "codex",
+    label: "Codex",
+    harness: "codex-native",
+    surfaces: ["openai"],
+    login: "codex-login",
+    icon: CodexIcon,
+  },
+  {
+    id: "cursor",
+    label: "Cursor",
+    harness: "cursor",
+    surfaces: [],
+    login: "cursor-login",
+    logout: "cursor-logout",
+    icon: CursorIcon,
+  },
+  {
+    id: "opencode",
+    label: "OpenCode",
+    harness: "opencode",
+    surfaces: [],
+    login: "opencode-login",
+    icon: OpenCodeIcon,
+  },
+  {
+    id: "pi",
+    label: "Pi",
+    harness: "pi-native",
+    surfaces: ["pi", "anthropic", "openai"],
+    icon: PiIcon,
+  },
+  ...GUIDED_HARNESSES.filter(
+    (item) =>
+      !["claude-native", "codex-native", "cursor", "opencode", "pi-native"].includes(item.id),
+  ).map((item) => ({
+    id: item.id,
+    label: item.label,
+    harness: item.id === "antigravity" ? "antigravity-native" : item.id,
+    surfaces: [],
+    login: item.action,
+    logout: item.logout,
+    icon: iconForAgent({ name: item.id, harness: item.id }),
+  })),
+];
+
+function agentIdForOperation(action: SetupOperationAction): string {
+  if (action.startsWith("claude-")) return "claude";
+  if (action.startsWith("codex-") || action === "databricks-configure") return "codex";
+  return action.split("-")[0];
+}
+
+type AgentMethod =
+  | "key"
+  | "gateway"
+  | "bedrock"
+  | "databricks"
+  | "cursor-key"
+  | "antigravity-key"
+  | "copilot-settings"
+  | "opencode-model"
+  | null;
+
+function checkedSetupStatusLabel(availability: SetupHarnessStatus["availability"]): string {
+  if (availability === true) return "Ready according to setup";
+  if (availability === "needs-auth") return "Sign-in or configuration needed";
+  if (availability === "version-too-low") return "Update needed";
+  return "Installation needed";
+}
+
+function AgentSettings({
   host,
   inventory,
   canMutate,
   busy,
   detection,
+  detecting,
+  onDetect,
+  checkedStatuses,
+  statusErrors,
+  checkingHarness,
+  onCheckStatus,
   onAction,
   onStart,
+  selectedAgentId,
+  onSelectAgent,
+  operation,
+  operationAgentId,
+  operationPanelRef,
+  onOperationChange,
+  onOperationFinished,
 }: {
   host: Host;
   inventory: SetupInventory;
   canMutate: boolean;
   busy: boolean;
   detection: SetupDetection | null;
+  detecting: boolean;
+  onDetect: () => void;
+  checkedStatuses: Partial<Record<SetupStatusHarness, SetupHarnessStatus>>;
+  statusErrors: Partial<Record<SetupStatusHarness, string>>;
+  checkingHarness: SetupStatusHarness | null;
+  onCheckStatus: (harness: SetupStatusHarness) => void;
   onAction: (action: SetupAction) => Promise<boolean>;
-  onStart: (action: SetupOperationAction, parameters?: Record<string, unknown>) => Promise<boolean>;
+  onStart: (
+    action: SetupOperationAction,
+    parameters?: Record<string, unknown>,
+    originatingAgent?: string,
+  ) => Promise<boolean>;
+  selectedAgentId: string | null;
+  onSelectAgent: (id: string | null) => void;
+  operation: SetupOperation | null;
+  operationAgentId: string | null;
+  operationPanelRef: React.RefObject<HTMLDivElement | null>;
+  onOperationChange: (operation: SetupOperation) => void;
+  onOperationFinished: () => void;
 }) {
-  const [setupHarness, setSetupHarness] = useState<{ id: string; label: string } | null>(null);
-  return (
-    <SectionCard
-      title="Agent authentication"
-      description="Install agents, sign in to vendor CLIs, or use a host-stored key."
-    >
-      <div className="divide-y">
-        <SubscriptionRow
-          label="Pi original authentication"
-          onStart={() => void onAction({ action: "subscription", cli: "pi" })}
-          canMutate={canMutate}
-          busy={busy}
-          direct
-        />
-        {(["cursor", "antigravity", "copilot"] as const).map((harness) => (
-          <HarnessKeyRow
-            key={harness}
-            harness={harness}
-            configured={inventory.harness_settings[`${harness}_key_configured`]}
-            canMutate={canMutate}
-            busy={busy}
-            onAction={onAction}
+  const [showMore, setShowMore] = useState(false);
+  const [method, setMethod] = useState<AgentMethod>(null);
+  const [managedProvider, setManagedProvider] = useState<string | null>(null);
+  const setupSteps = useHarnessSetupSteps();
+  const install = useInstallHarness(host.host_id);
+  const info = useServerInfo();
+  const agent = AGENT_OPTIONS.find((item) => item.id === selectedAgentId) ?? null;
+  const builtinAcp = inventory.builtin_acp?.find((item) => item.id === selectedAgentId);
+  const compatible = agent
+    ? inventory.providers.filter((provider) => providerMatchesAgent(provider, agent))
+    : [];
+  const primarySurface = agent ? primarySurfaceForAgent(agent) : undefined;
+  const steps = agent ? resolveSetupSteps(setupSteps[agent.harness], agent.harness, host) : [];
+  const installStep = steps.find((step) => step.kind === "install" && step.status === "todo");
+  const readiness = agent
+    ? (checkedStatuses[agent.harness]?.availability ?? host.configured_harnesses?.[agent.harness])
+    : undefined;
+  const availableLogin =
+    !!agent?.login && operationAvailable(inventory, host, agent.login, agent.harness);
+  const needsInstall =
+    !availableLogin &&
+    (readiness === false || readiness === "binary-missing" || readiness === "version-too-low");
+  const canInstall = agent && harnessInstallableOnHost(info, agent.harness, host);
+  const chooseAgent = (id: string | null) => {
+    setMethod(null);
+    setManagedProvider(null);
+    onSelectAgent(id);
+  };
+  const agentStatus = (item: AgentOption) => {
+    if (statusErrors[item.harness]) return "Status check failed";
+    const checked = checkedStatuses[item.harness];
+    if (checked) return checkedSetupStatusLabel(checked.availability);
+    const itemReadiness = host.configured_harnesses?.[item.harness];
+    if (itemReadiness === true) return "Available on this computer";
+    const count = inventory.providers.filter((provider) =>
+      providerMatchesAgent(provider, item),
+    ).length;
+    if (count) return `${count} saved connection${count === 1 ? "" : "s"}`;
+    if (
+      itemReadiness === false ||
+      itemReadiness === "binary-missing" ||
+      itemReadiness === "version-too-low"
+    )
+      return "Installation needed";
+    if (itemReadiness === "needs-auth") return "Sign-in needed";
+    if (item.login && itemReadiness === undefined) return "Sign-in status not checked";
+    if (item.login && operationAvailable(inventory, host, item.login, item.harness))
+      return "Sign-in available";
+    return "Choose how to connect";
+  };
+
+  if (!agent && !builtinAcp) {
+    return (
+      <section className="overflow-hidden rounded-xl border border-border bg-card">
+        <div className="border-b px-4 py-3">
+          <h2 className="text-base font-semibold">Agents</h2>
+          <p className="text-sm text-muted-foreground">
+            Choose an agent to connect on {host.name}.
+          </p>
+        </div>
+        <div className="divide-y">
+          {AGENT_OPTIONS.filter((_, index) => showMore || index < 5).map((item) => {
+            const Icon = item.icon;
+            return (
+              <button
+                key={item.id}
+                data-testid={`setup-agent-${item.id}`}
+                type="button"
+                className="flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-muted/40"
+                onClick={() => chooseAgent(item.id)}
+              >
+                <Icon className="size-5 shrink-0" />
+                <span className="min-w-0 flex-1">
+                  <span className="block text-sm font-medium">{item.label}</span>
+                  <span className="block text-xs text-muted-foreground">{agentStatus(item)}</span>
+                </span>
+                <ChevronRightIcon className="size-4 text-muted-foreground" />
+              </button>
+            );
+          })}
+          {showMore &&
+            inventory.builtin_acp?.map((item) => {
+              const Icon = iconForAgent({ name: item.id, harness: item.id });
+              return (
+                <button
+                  key={item.id}
+                  type="button"
+                  data-testid={`setup-agent-${item.id}`}
+                  className="flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-muted/40"
+                  onClick={() => chooseAgent(item.id)}
+                >
+                  <Icon className="size-5 shrink-0" />
+                  <span className="min-w-0 flex-1 text-sm font-medium">{item.label}</span>
+                  <ChevronRightIcon className="size-4 text-muted-foreground" />
+                </button>
+              );
+            })}
+        </div>
+        <button
+          type="button"
+          className="flex w-full items-center justify-between border-t px-4 py-3 text-left text-sm text-muted-foreground hover:bg-muted/40"
+          onClick={() => setShowMore(!showMore)}
+          aria-expanded={showMore}
+        >
+          {showMore ? "Fewer agents" : "More agents"}
+          <ChevronDownIcon
+            className={cn("size-4 transition-transform", showMore && "rotate-180")}
           />
-        ))}
-        <CopilotHostRow
-          value={inventory.harness_settings.copilot_host ?? ""}
-          canMutate={canMutate}
-          busy={busy}
-          onAction={onAction}
-        />
-        <OpenCodeModelRow
-          value={inventory.harness_settings.opencode_model ?? ""}
-          models={detection?.models.opencode ?? []}
-          canMutate={canMutate}
-          busy={busy}
-          onAction={onAction}
-        />
-        <DatabricksGuidedRow
-          canMutate={canMutate}
-          available={operationAvailable(inventory, host, "databricks-configure")}
-          busy={busy}
-          onStart={onStart}
-        />
-        {GUIDED_HARNESSES.map((item) => (
-          <div key={item.id} className="flex flex-wrap items-center justify-between gap-3 p-4">
-            <div>
-              <div className="text-sm font-medium">{item.label}</div>
-              <div className="text-xs text-muted-foreground">
-                Install, readiness, and vendor instructions for this computer.
-              </div>
+        </button>
+      </section>
+    );
+  }
+
+  if (builtinAcp) {
+    const Icon = iconForAgent({ name: builtinAcp.id, harness: builtinAcp.id });
+    return (
+      <section className="rounded-xl border border-border bg-card p-4">
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="-ml-2"
+          onClick={() => chooseAgent(null)}
+        >
+          <ArrowLeftIcon className="size-4" /> Back to agents
+        </Button>
+        <div className="mt-3 flex items-center gap-3">
+          <Icon className="size-6" />
+          <h2 className="text-lg font-semibold">{builtinAcp.label}</h2>
+        </div>
+        <div className="mt-4 space-y-3 text-sm">
+          <div>
+            <h3 className="font-medium">Install on {host.name}</h3>
+            <p className="mt-1 text-muted-foreground">{builtinAcp.install_command}</p>
+          </div>
+          <div>
+            <h3 className="font-medium">Authenticate</h3>
+            <p className="mt-1 text-muted-foreground">{builtinAcp.auth_instructions}</p>
+          </div>
+        </div>
+      </section>
+    );
+  }
+
+  if (!agent) return null;
+
+  const Icon = agent.icon;
+  const statusError = statusErrors[agent.harness];
+  return (
+    <section className="overflow-hidden rounded-xl border border-border bg-card">
+      <div className="border-b px-4 py-3">
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="-ml-2 mb-2"
+          onClick={() => chooseAgent(null)}
+        >
+          <ArrowLeftIcon className="size-4" /> Back to agents
+        </Button>
+        <div className="flex items-center gap-3">
+          <Icon className="size-6" />
+          <div>
+            <h2 className="text-lg font-semibold">{agent.label}</h2>
+            <p className="text-sm text-muted-foreground">
+              {agentStatus(agent)} · {host.name}
+            </p>
+          </div>
+        </div>
+        {canMutate && (
+          <div className="mt-3 flex flex-wrap items-center gap-3">
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              loading={checkingHarness === agent.harness}
+              disabled={busy}
+              onClick={() => onCheckStatus(agent.harness)}
+            >
+              Check setup status
+            </Button>
+            <p className="text-xs text-muted-foreground">
+              Uses the CLI’s setup checks and may request access to stored credentials.
+            </p>
+          </div>
+        )}
+        {statusError && <InlineError message={statusError} />}
+      </div>
+      {needsInstall && (
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b bg-muted/30 px-4 py-3">
+          <div>
+            <p className="text-sm font-medium">Install {agent.label}</p>
+            <p className="text-xs text-muted-foreground">
+              {installStep?.detail ??
+                `${agent.label} must be installed on ${host.name} before sign-in.`}
+              {!canInstall && " Install it on this computer, then check setup status again."}
+            </p>
+          </div>
+          {canInstall && canMutate && (
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              loading={install.isPending}
+              disabled={busy}
+              onClick={() => install.mutate(agent.harness)}
+            >
+              Install
+            </Button>
+          )}
+          {install.isError && <InlineError message={install.error.message} />}
+        </div>
+      )}
+      {operation && operationAgentId === agent.id && (
+        <div ref={operationPanelRef} className="border-b p-4">
+          <ProviderSetupTerminal
+            hostId={host.host_id}
+            operation={operation}
+            title={
+              operation.action === "codex-login"
+                ? "Sign in to ChatGPT"
+                : operation.action === "claude-login"
+                  ? "Sign in to Claude"
+                  : `${operation.action.replaceAll("-", " ")}`
+            }
+            onOperationChange={onOperationChange}
+            onFinished={onOperationFinished}
+          />
+        </div>
+      )}
+      {compatible.length > 0 && (
+        <div className="border-b">
+          <h3 className="px-4 pt-4 text-sm font-medium">Saved connections</h3>
+          <p className="px-4 pb-2 text-xs text-muted-foreground">
+            Changing the default affects new {agent.label} sessions on {host.name}. Running sessions
+            keep their connection.
+          </p>
+          <div className="divide-y">
+            {compatible.map((provider) => {
+              const isDefault =
+                !!primarySurface && inventory.effective_defaults[primarySurface] === provider.name;
+              return (
+                <div
+                  key={provider.name}
+                  className="px-4 py-3"
+                  data-testid={`agent-provider-row-${provider.name}`}
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <p className="text-sm font-medium">
+                        {provider.name}{" "}
+                        {isDefault && <StatusBadge good>Used for new sessions</StatusBadge>}
+                      </p>
+                      <p className="text-xs text-muted-foreground">
+                        {setupLabel(provider.kind)} · Saved locally
+                      </p>
+                    </div>
+                    <div className="flex gap-2">
+                      {canMutate && primarySurface && !isDefault && (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          disabled={busy}
+                          onClick={() =>
+                            void onAction({
+                              action: "set_default",
+                              name: provider.name,
+                              surface: primarySurface,
+                            })
+                          }
+                        >
+                          Use for new {agent.label} sessions
+                        </Button>
+                      )}
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="ghost"
+                        onClick={() =>
+                          setManagedProvider(
+                            managedProvider === provider.name ? null : provider.name,
+                          )
+                        }
+                      >
+                        Manage
+                      </Button>
+                    </div>
+                  </div>
+                  {managedProvider === provider.name && (
+                    <div className="mt-3 rounded-lg border">
+                      <ProviderRow
+                        provider={provider}
+                        effectiveDefaults={inventory.effective_defaults}
+                        canMutate={canMutate}
+                        busy={busy}
+                        onDefault={(next) =>
+                          void onAction({
+                            action: "set_default",
+                            name: provider.name,
+                            surface: next,
+                          })
+                        }
+                        onRemove={() => setManagedProvider(`remove:${provider.name}`)}
+                      />
+                    </div>
+                  )}
+                  {managedProvider === `remove:${provider.name}` && (
+                    <ConfirmRemoval
+                      provider={provider}
+                      busy={busy}
+                      onCancel={() => setManagedProvider(provider.name)}
+                      onConfirm={() =>
+                        void onAction({ action: "remove_provider", name: provider.name }).then(
+                          (done) => {
+                            if (done) setManagedProvider(null);
+                          },
+                        )
+                      }
+                    />
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+      {canMutate && (
+        <div className="p-4">
+          <h3 className="text-sm font-medium">
+            {compatible.length ? "Add connection" : "Connect"}
+          </h3>
+          <div className="mt-3 flex flex-wrap gap-2">
+            {agent.login && (
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={busy || !availableLogin || needsInstall}
+                onClick={() => void onStart(agent.login!)}
+              >
+                <TerminalIcon className="size-4" />{" "}
+                {agent.id === "codex"
+                  ? "ChatGPT subscription"
+                  : agent.id === "claude"
+                    ? "Claude subscription"
+                    : agent.id === "cursor" ||
+                        agent.id === "antigravity" ||
+                        agent.id === "kiro" ||
+                        agent.id === "kimi"
+                      ? `Sign in to ${agent.label}`
+                      : `Configure ${agent.label}`}
+              </Button>
+            )}
+            {agent.login && !availableLogin && !needsInstall && (
+              <p className="w-full text-xs text-muted-foreground">
+                The {agent.label} setup command is unavailable on {host.name}. Check the installed
+                CLI and reconnect the host.
+              </p>
+            )}
+            {agent.id === "pi" && (
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={busy || needsInstall}
+                onClick={() => void onAction({ action: "subscription", cli: "pi" })}
+              >
+                Pi subscription
+              </Button>
+            )}
+            {(agent.id === "claude" || agent.id === "codex" || agent.id === "pi") && (
+              <Button
+                type="button"
+                size="sm"
+                variant={method === "key" ? "secondary" : "outline"}
+                disabled={busy}
+                onClick={() => setMethod(method === "key" ? null : "key")}
+              >
+                <KeyRoundIcon className="size-4" /> API key
+              </Button>
+            )}
+            {(agent.id === "claude" || agent.id === "codex" || agent.id === "pi") && (
+              <Button
+                type="button"
+                size="sm"
+                variant={method === "gateway" ? "secondary" : "outline"}
+                disabled={busy}
+                onClick={() => setMethod(method === "gateway" ? null : "gateway")}
+              >
+                Compatible gateway
+              </Button>
+            )}
+            {agent.id === "claude" && (
+              <Button
+                type="button"
+                size="sm"
+                variant={method === "bedrock" ? "secondary" : "outline"}
+                disabled={busy}
+                onClick={() => setMethod(method === "bedrock" ? null : "bedrock")}
+              >
+                Bedrock
+              </Button>
+            )}
+            {agent.id === "cursor" && (
+              <Button
+                type="button"
+                size="sm"
+                variant={method === "cursor-key" ? "secondary" : "outline"}
+                disabled={busy}
+                onClick={() => setMethod(method === "cursor-key" ? null : "cursor-key")}
+              >
+                Cursor API key
+              </Button>
+            )}
+            {(["antigravity", "copilot", "opencode"] as const).includes(
+              agent.id as "antigravity" | "copilot" | "opencode",
+            ) && (
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={busy}
+                onClick={() => {
+                  const next =
+                    agent.id === "antigravity"
+                      ? "antigravity-key"
+                      : agent.id === "copilot"
+                        ? "copilot-settings"
+                        : "opencode-model";
+                  setMethod(method === next ? null : next);
+                }}
+              >
+                {agent.id === "opencode"
+                  ? "Default model"
+                  : agent.id === "copilot"
+                    ? "Copilot token and host"
+                    : "Antigravity API key"}
+              </Button>
+            )}
+            {(agent.id === "claude" || agent.id === "codex" || agent.id === "pi") && (
+              <Button
+                type="button"
+                size="sm"
+                variant={method === "databricks" ? "secondary" : "outline"}
+                disabled={busy}
+                onClick={() => setMethod(method === "databricks" ? null : "databricks")}
+              >
+                Databricks
+              </Button>
+            )}
+          </div>
+          {method && (
+            <div className="mt-4 rounded-lg border bg-muted/20 p-4">
+              {method === "key" && (
+                <KeyProviderForm
+                  key={agent.id}
+                  catalog={inventory.key_providers.filter((item) =>
+                    agent.surfaces.includes(item.family as ProviderSurface),
+                  )}
+                  defaultModels={{}}
+                  busy={busy}
+                  onAction={onAction}
+                  onDone={() => setMethod(null)}
+                />
+              )}
+              {method === "gateway" && (
+                <GatewayForm
+                  key={agent.id}
+                  initialFamily={agent.id === "claude" ? "anthropic" : "openai"}
+                  busy={busy}
+                  onAction={onAction}
+                  onDone={() => setMethod(null)}
+                />
+              )}
+              {method === "bedrock" && (
+                <BedrockForm busy={busy} onAction={onAction} onDone={() => setMethod(null)} />
+              )}
+              {method === "cursor-key" && (
+                <HarnessKeyRow
+                  harness="cursor"
+                  configured={inventory.harness_settings.cursor_key_configured}
+                  canMutate={canMutate}
+                  busy={busy}
+                  onAction={onAction}
+                />
+              )}
+              {method === "antigravity-key" && (
+                <HarnessKeyRow
+                  harness="antigravity"
+                  configured={inventory.harness_settings.antigravity_key_configured}
+                  canMutate={canMutate}
+                  busy={busy}
+                  onAction={onAction}
+                />
+              )}
+              {method === "copilot-settings" && (
+                <div className="divide-y">
+                  <HarnessKeyRow
+                    harness="copilot"
+                    configured={inventory.harness_settings.copilot_key_configured}
+                    canMutate={canMutate}
+                    busy={busy}
+                    onAction={onAction}
+                  />
+                  <CopilotHostRow
+                    value={inventory.harness_settings.copilot_host ?? ""}
+                    canMutate={canMutate}
+                    busy={busy}
+                    onAction={onAction}
+                  />
+                </div>
+              )}
+              {method === "opencode-model" && (
+                <OpenCodeModelRow
+                  value={inventory.harness_settings.opencode_model ?? ""}
+                  models={detection?.models.opencode ?? []}
+                  canMutate={canMutate}
+                  busy={busy}
+                  onAction={onAction}
+                />
+              )}
+              {method === "databricks" && (
+                <DatabricksGuidedRow
+                  initialAgent={agent.id as "claude" | "codex" | "pi"}
+                  canMutate={canMutate}
+                  available={operationAvailable(inventory, host, "databricks-configure")}
+                  busy={busy}
+                  onStart={(action, parameters) => onStart(action, parameters, agent.id)}
+                />
+              )}
             </div>
-            {canMutate && (
-              <div className="flex gap-2">
+          )}
+          {agent.surfaces.length > 0 && (
+            <div className="mt-4">
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                loading={detecting}
+                disabled={busy}
+                onClick={onDetect}
+              >
+                <WandSparklesIcon className="size-4" /> Find credentials on this computer
+              </Button>
+            </div>
+          )}
+          {agent.surfaces.length > 0 && detection && (
+            <div className="mt-3 rounded-lg border">
+              <DetectionResults
+                detection={{
+                  ...detection,
+                  providers: detection.providers.filter((item) =>
+                    detectedProviderMatchesAgent(item, agent),
+                  ),
+                  warnings: detection.warnings?.filter(
+                    (warning) =>
+                      agent.id === "claude" || warning !== CLAUDE_KEYCHAIN_DETECTION_NOTICE,
+                  ),
+                }}
+                dismissed={inventory.dismissed_detections}
+                canMutate={canMutate}
+                busy={busy}
+                onAction={onAction}
+              />
+            </div>
+          )}
+          {agent.logout &&
+            agent.id !== "claude" &&
+            agent.id !== "codex" &&
+            operationAvailable(inventory, host, agent.logout, agent.harness) && (
+              <div className="mt-4 border-t pt-3">
                 <Button
                   type="button"
                   size="sm"
-                  variant="outline"
-                  onClick={() => setSetupHarness(item)}
+                  variant="ghost"
+                  disabled={busy}
+                  onClick={() => void onStart(agent.logout!)}
                 >
-                  Setup
+                  Sign out of {agent.label}
                 </Button>
-                {item.action &&
-                  (operationAvailable(inventory, host, item.action, item.id) ? (
-                    <Button
-                      type="button"
-                      size="sm"
-                      disabled={busy}
-                      onClick={() => void onStart(item.action!)}
-                    >
-                      <TerminalIcon className="size-4" /> {guidedActionLabel(item.action)}
-                    </Button>
-                  ) : (
-                    <Button
-                      type="button"
-                      size="sm"
-                      disabled
-                      title="Install this agent on the selected computer before starting its vendor setup."
-                    >
-                      {guidedActionLabel(item.action)} unavailable
-                    </Button>
-                  ))}
-                {item.logout &&
-                  (operationAvailable(inventory, host, item.logout, item.id) ? (
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="ghost"
-                      disabled={busy}
-                      onClick={() => void onStart(item.logout!)}
-                    >
-                      Sign out
-                    </Button>
-                  ) : (
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="ghost"
-                      disabled
-                      title="This vendor sign-out command is unavailable on the selected computer."
-                    >
-                      Sign out unavailable
-                    </Button>
-                  ))}
               </div>
             )}
-          </div>
-        ))}
-      </div>
-      <HarnessSetupDialog
-        open={setupHarness !== null}
-        onOpenChange={(open) => {
-          if (!open) setSetupHarness(null);
-        }}
-        agentName={setupHarness?.label}
-        harness={setupHarness?.id ?? null}
-        host={host}
-      />
-    </SectionCard>
+        </div>
+      )}
+    </section>
   );
 }
 
-function SubscriptionRow({
-  label,
+function AdvancedProviderTools({
+  inventory,
+  detection,
+  detectionRequest,
   canMutate,
   busy,
-  onStart,
-  direct = false,
+  onAction,
+  onDetectImport,
+  detecting,
+  onDetect,
 }: {
-  label: string;
+  inventory: SetupInventory;
+  detection: SetupDetection | null;
+  detectionRequest: SetupDetectRequest | null;
   canMutate: boolean;
   busy: boolean;
-  onStart: () => void;
-  direct?: boolean;
+  onAction: (action: SetupAction) => Promise<boolean>;
+  onDetectImport: (request: SetupDetectRequest) => void;
+  detecting: boolean;
+  onDetect: () => void;
 }) {
+  const [task, setTask] = useState<"connections" | "add" | "custom" | "import" | null>(null);
+  const tasks = [
+    {
+      id: "connections",
+      label: "Manage all connections",
+      detail: "Defaults, credentials, and removal",
+    },
+    { id: "add", label: "Add a provider", detail: "API keys, gateways, or Bedrock" },
+    { id: "custom", label: "Custom ACP agents", detail: "Add and manage launch commands" },
+    { id: "import", label: "Import ACP agents", detail: "Preview OpenClaw or acpx configuration" },
+  ] as const;
+  const title = tasks.find((item) => item.id === task)?.label;
   return (
-    <div className="flex flex-wrap items-center justify-between gap-3 p-4">
-      <div>
-        <div className="text-sm font-medium">{label}</div>
-        <div className="text-xs text-muted-foreground">
-          {direct
-            ? "Use Pi's original provider without a browser login."
-            : "Complete the vendor-owned login in an embedded terminal."}
-        </div>
+    <details className="rounded-xl border border-border bg-card">
+      <summary className="cursor-pointer px-4 py-3 text-sm font-medium">
+        Advanced provider tools
+      </summary>
+      <div className="border-t p-4">
+        {task === null ? (
+          <div className="grid gap-2 sm:grid-cols-2">
+            {tasks.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                className="flex items-center justify-between gap-3 rounded-lg border border-border px-3 py-3 text-left hover:bg-muted/40"
+                onClick={() => setTask(item.id)}
+              >
+                <span>
+                  <span className="block text-sm font-medium">{item.label}</span>
+                  <span className="block text-xs text-muted-foreground">{item.detail}</span>
+                </span>
+                <ChevronRightIcon className="size-4 shrink-0 text-muted-foreground" />
+              </button>
+            ))}
+          </div>
+        ) : (
+          <div className="flex flex-col gap-4">
+            <div className="flex items-center gap-2">
+              <Button type="button" size="sm" variant="ghost" onClick={() => setTask(null)}>
+                <ArrowLeftIcon className="size-4" /> Back to tools
+              </Button>
+              <h2 className="text-sm font-medium">{title}</h2>
+            </div>
+            {task === "connections" && (
+              <ProviderOverview
+                inventory={inventory}
+                canMutate={canMutate}
+                busy={busy}
+                detection={detection}
+                detecting={detecting}
+                onDetect={onDetect}
+                onAction={onAction}
+              />
+            )}
+            {task === "add" && (
+              <ProviderForms
+                inventory={inventory}
+                detection={detection}
+                canMutate={canMutate}
+                busy={busy}
+                onAction={onAction}
+              />
+            )}
+            {task === "custom" && (
+              <div className="rounded-lg border">
+                <AcpList
+                  agents={inventory.acp_agents}
+                  canMutate={canMutate}
+                  busy={busy}
+                  onAction={onAction}
+                />
+                <div className="border-t">
+                  <AcpForm canMutate={canMutate} busy={busy} onAction={onAction} />
+                </div>
+              </div>
+            )}
+            {task === "import" && (
+              <div className="rounded-lg border">
+                {canMutate && (
+                  <div className="p-4">
+                    <Button
+                      variant="outline"
+                      loading={detecting}
+                      disabled={busy}
+                      onClick={onDetect}
+                    >
+                      Find existing configuration
+                    </Button>
+                    <p className="mt-2 text-xs text-muted-foreground">
+                      Check this computer's setup configuration, including OpenClaw and acpx.
+                    </p>
+                  </div>
+                )}
+                <ImportDetectionForm
+                  canMutate={canMutate}
+                  detecting={detecting}
+                  onDetect={onDetectImport}
+                />
+                <ImportPreviewList
+                  imports={detection?.imports ?? []}
+                  searched={detection !== null}
+                  detectionRequest={detectionRequest}
+                  canMutate={canMutate}
+                  busy={busy}
+                  onAction={onAction}
+                />
+                {!!detection?.warnings?.length && (
+                  <details className="border-t px-4 py-3 text-xs text-muted-foreground">
+                    <summary className="cursor-pointer">Detection notes</summary>
+                    {detection.warnings.map((warning) => (
+                      <p key={warning} className="mt-2">
+                        {warning}
+                      </p>
+                    ))}
+                  </details>
+                )}
+              </div>
+            )}
+          </div>
+        )}
       </div>
-      {canMutate && (
-        <Button type="button" size="sm" variant="outline" disabled={busy} onClick={onStart}>
-          {direct ? "Use subscription" : "Sign in"}
-        </Button>
-      )}
-    </div>
+    </details>
   );
 }
 
@@ -1479,7 +2373,13 @@ function HarnessKeyRow({
         </div>
         {canMutate && (
           <div className="flex gap-2">
-            <Button type="button" size="sm" variant="outline" onClick={() => setOpen(!open)}>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={busy}
+              onClick={() => setOpen(!open)}
+            >
               {configured ? "Replace key" : "Add key"}
             </Button>
             {configured && (
@@ -1563,7 +2463,7 @@ function CopilotHostRow({
           Leave blank for github.com.
         </span>
         <Input
-          disabled={!canMutate}
+          disabled={!canMutate || busy}
           value={host}
           onChange={(e) => setHost(e.target.value)}
           placeholder="github.example.com"
@@ -1606,7 +2506,7 @@ function OpenCodeModelRow({
           Applies to new OpenCode processes. Clear it to let OpenCode choose.
         </span>
         <Input
-          disabled={!canMutate}
+          disabled={!canMutate || busy}
           list="opencode-models"
           value={model}
           onChange={(e) => setModel(e.target.value)}
@@ -1628,18 +2528,20 @@ function OpenCodeModelRow({
 }
 
 function DatabricksGuidedRow({
+  initialAgent,
   canMutate,
   available,
   busy,
   onStart,
 }: {
+  initialAgent: "claude" | "codex" | "pi";
   canMutate: boolean;
   available: boolean;
   busy: boolean;
   onStart: (action: SetupOperationAction, parameters?: Record<string, unknown>) => Promise<boolean>;
 }) {
   const [workspace, setWorkspace] = useState("");
-  const [agents, setAgents] = useState(["claude", "codex"]);
+  const [agents, setAgents] = useState<string[]>([initialAgent]);
   const toggle = (agent: string) =>
     setAgents((items) =>
       items.includes(agent) ? items.filter((item) => item !== agent) : [...items, agent],
@@ -1663,7 +2565,7 @@ function DatabricksGuidedRow({
         <label className="flex min-w-64 flex-1 flex-col gap-1 text-sm font-medium">
           Workspace URL
           <Input
-            disabled={!canMutate || !available}
+            disabled={!canMutate || !available || busy}
             inputMode="url"
             value={workspace}
             onChange={(e) => setWorkspace(e.target.value)}
@@ -1671,10 +2573,10 @@ function DatabricksGuidedRow({
           />
         </label>
         <div className="flex gap-3 pb-2 text-sm">
-          {["claude", "codex", "opencode"].map((agent) => (
+          {["claude", "codex", "pi", "opencode"].map((agent) => (
             <label key={agent} className="flex items-center gap-1.5 capitalize">
               <input
-                disabled={!canMutate || !available}
+                disabled={!canMutate || !available || busy}
                 type="checkbox"
                 checked={agents.includes(agent)}
                 onChange={() => toggle(agent)}
@@ -1700,64 +2602,6 @@ function DatabricksGuidedRow({
         )}
       </div>
     </form>
-  );
-}
-
-function AdvancedSettings({
-  inventory,
-  detection,
-  detectionRequest,
-  canMutate,
-  busy,
-  onAction,
-  onDetectImport,
-  detecting,
-}: {
-  inventory: SetupInventory;
-  detection: SetupDetection | null;
-  detectionRequest: SetupDetectRequest | null;
-  canMutate: boolean;
-  busy: boolean;
-  onAction: (action: SetupAction) => Promise<boolean>;
-  onDetectImport: (request: SetupDetectRequest) => void;
-  detecting: boolean;
-}) {
-  const [expanded, setExpanded] = useState(false);
-  return (
-    <SectionCard title="Advanced" description="Custom ACP agents and configuration imports.">
-      <button
-        type="button"
-        className="flex w-full items-center justify-between p-4 text-left text-sm font-medium"
-        aria-expanded={expanded}
-        onClick={() => setExpanded(!expanded)}
-      >
-        Advanced provider tools
-        <ChevronDownIcon className={cn("size-4 transition-transform", expanded && "rotate-180")} />
-      </button>
-      {expanded && (
-        <div className="border-t">
-          <AcpForm canMutate={canMutate} busy={busy} onAction={onAction} />
-          <AcpList
-            agents={inventory.acp_agents}
-            canMutate={canMutate}
-            busy={busy}
-            onAction={onAction}
-          />
-          <ImportDetectionForm
-            canMutate={canMutate}
-            detecting={detecting}
-            onDetect={onDetectImport}
-          />
-          <ImportPreviewList
-            imports={detection?.imports ?? []}
-            detectionRequest={detectionRequest}
-            canMutate={canMutate}
-            busy={busy}
-            onAction={onAction}
-          />
-        </div>
-      )}
-    </SectionCard>
   );
 }
 
@@ -1970,12 +2814,14 @@ function AcpList({
 
 function ImportPreviewList({
   imports,
+  searched,
   detectionRequest,
   canMutate,
   busy,
   onAction,
 }: {
   imports: SetupImportPreview[];
+  searched: boolean;
   detectionRequest: SetupDetectRequest | null;
   canMutate: boolean;
   busy: boolean;
@@ -1992,7 +2838,9 @@ function ImportPreviewList({
   if (imports.length === 0)
     return (
       <p className="border-t p-4 text-sm text-muted-foreground">
-        Run detection to preview OpenClaw or acpx agents. Credentials are never imported.
+        {searched
+          ? "No importable agents found. You can try a configuration path."
+          : "Find existing configuration or choose a path to preview agents. Credentials are never imported."}
       </p>
     );
   return (

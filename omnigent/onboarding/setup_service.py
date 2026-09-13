@@ -18,6 +18,7 @@ from omnigent.onboarding.acp_auth import (
     acp_agents,
     acp_agents_settings,
     parse_env_passthrough,
+    shadowed_builtin_acp_rows,
     slugify,
 )
 from omnigent.onboarding.provider_config import (
@@ -38,10 +39,12 @@ from omnigent.onboarding.setup_schema import (  # noqa: F401
     AddGateway,
     AddKey,
     AdoptDetected,
+    BuiltinAcpSetup,
     CredentialInput,
     DetectedConnection,
     DismissDetection,
     HarnessSettings,
+    HarnessStatus,
     ImportAcp,
     ImportPreview,
     KeyProvider,
@@ -59,7 +62,6 @@ from omnigent.onboarding.setup_schema import (  # noqa: F401
     SetupInventory,
     SetupProvider,
     Subscription,
-    UpdateProviderCredential,
 )
 
 if TYPE_CHECKING:
@@ -192,10 +194,23 @@ def get_setup_inventory() -> SetupInventory:
         AcpAgent(**{**asdict(agent), "command": _safe_command(agent.command)})
         for agent in acp_agents(config)
     ]
+    from omnigent.acp_cli_harnesses import ACP_CLI_HARNESSES
+
+    shadowed = shadowed_builtin_acp_rows(acp_agents(config))
     return SetupInventory(
         providers=providers,
         key_providers=catalog,
         acp_agents=agents,
+        builtin_acp=[
+            BuiltinAcpSetup(
+                id=name,
+                label=row.label,
+                install_command=row.install.install_hint or row.binary,
+                auth_instructions=row.install.auth_hint or "Use the CLI's own authentication.",
+            )
+            for name, row in sorted(ACP_CLI_HARNESSES.items())
+            if name not in shadowed
+        ],
         dismissed_detections=sorted(dismissed_detection_names(config)),
         effective_defaults=defaults,
         pi_default_requires_detection=pi_requires_detection,
@@ -219,6 +234,26 @@ def get_setup_inventory() -> SetupInventory:
 
 def detect_setup_connections(request: SetupDetectRequest | None = None) -> SetupDetection:
     """Explicitly inspect host vendor configuration and model catalogs."""
+    request = request or SetupDetectRequest()
+    if request.harness is not None:
+        from omnigent.onboarding.harness_readiness import (
+            _canonical_harness,
+            _harness_availability,
+        )
+
+        try:
+            availability = _harness_availability(_canonical_harness(request.harness))
+            return SetupDetection(
+                harness_status=HarnessStatus(
+                    harness=request.harness,
+                    availability=availability,
+                )
+            )
+        except Exception:
+            return SetupDetection(
+                warnings=["The requested harness status could not be checked on this computer"]
+            )
+
     from omnigent.onboarding.ambient import detect_providers
     from omnigent.onboarding.providers import default_chat_model, get_chat_models
 
@@ -241,7 +276,6 @@ def detect_setup_connections(request: SetupDetectRequest | None = None) -> Setup
         ]
     except Exception:
         result.warnings.append("Some host connections could not be inspected")
-    request = request or SetupDetectRequest()
     discovery = _discover_imports(request.import_path, request.import_source)
     result.imports = [
         ImportPreview(
@@ -284,6 +318,13 @@ def _save_provider_action(action: AddKey | AddGateway | AddBedrock) -> str:
     if isinstance(action, AddKey):
         if action.provider not in builders._CATALOG_PROVIDER_FAMILY:
             raise ValueError("Unsupported API key vendor")
+        model = action.model
+        if model is None:
+            from omnigent.onboarding.providers import default_chat_model
+
+            model = default_chat_model(action.provider)
+        if not model:
+            raise ValueError("No default model is available. Choose a model in More options.")
         family = builders.family_for_key_provider(action.provider)
         name = operations.resolve_key_provider_name(config, family, name, ref)
         if secret is not None:
@@ -293,7 +334,7 @@ def _save_provider_action(action: AddKey | AddGateway | AddBedrock) -> str:
             family,
             endpoint.base_url if endpoint else builders.default_base_url_for_family(family),
             ref,
-            action.model,
+            model,
             wire_api=endpoint.wire_api if endpoint else None,
         )
     elif isinstance(action, AddGateway):
@@ -314,7 +355,7 @@ def _save_provider_action(action: AddKey | AddGateway | AddBedrock) -> str:
         entry = builders.build_bedrock_provider_entry(
             _validate_url(action.base_url), ref, action.model
         )
-    settings, _ = operations.provider_add_settings(config, name, entry)
+    settings, _ = operations.provider_add_settings(config, name, entry, preserve_advanced=True)
     if secret is not None:
         operations.store_staged_secret(ref, secret)
     operations.save_setup_settings(settings)
@@ -393,32 +434,6 @@ def apply_setup_action(action: SetupAction) -> SetupActionResult:
         if isinstance(action, (AddKey, AddGateway, AddBedrock)):
             name = _save_provider_action(action)
             message = f"Added {name}"
-        elif isinstance(action, UpdateProviderCredential):
-            entry = load_providers(config).get(action.name)
-            if entry is None or entry.kind not in ("key", "gateway", "bedrock", "local"):
-                raise ValueError("This provider does not accept a managed credential")
-            if not set(action.families).issubset(entry.families):
-                raise ValueError("Select families served by this provider")
-            ref, secret = _credential_ref(action, action.name)
-            from copy import deepcopy
-
-            raw = config.get("providers")
-            assert isinstance(raw, dict)
-            providers = deepcopy(raw)
-            selected = providers[action.name]
-            assert isinstance(selected, dict)
-            if secret is not None:
-                ref = operations.staged_secret_ref(action.name)
-            for family in action.families:
-                family_block = selected[family]
-                assert isinstance(family_block, dict)
-                family_block.pop("api_key", None)
-                family_block.pop("auth_command", None)
-                family_block["api_key_ref"] = ref
-            load_providers({"providers": providers})
-            if secret is not None:
-                operations.store_staged_secret(ref, secret)
-            operations.save_setup_settings({"providers": providers})
         elif isinstance(action, Subscription):
             if action.cli != "pi":
                 from omnigent.onboarding.ambient import detect_providers

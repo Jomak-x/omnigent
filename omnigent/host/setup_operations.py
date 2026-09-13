@@ -47,9 +47,7 @@ _DATABRICKS_AGENTS = frozenset({"claude", "codex", "opencode", "pi"})
 
 class SetupOperationAction(StrEnum):
     CLAUDE_LOGIN = "claude-login"
-    CLAUDE_LOGOUT = "claude-logout"
     CODEX_LOGIN = "codex-login"
-    CODEX_LOGOUT = "codex-logout"
     CURSOR_LOGIN = "cursor-login"
     CURSOR_LOGOUT = "cursor-logout"
     ANTIGRAVITY_LOGIN = "antigravity-login"
@@ -626,7 +624,6 @@ class SetupOperationManager:
                 socket_path=str(operation.terminal.socket_path),
                 tmux_target=operation.terminal.tmux_target,
                 read_only=False,
-                seed_output=True,
                 seed_scrollback=False,
                 on_client_interaction=operation.terminal.note_client_interaction,
             )
@@ -704,9 +701,7 @@ _FIXED_COMMANDS: dict[SetupOperationAction, tuple[str, tuple[str, ...], str]] = 
         ("auth", "login", "--claudeai"),
         "Claude CLI",
     ),
-    SetupOperationAction.CLAUDE_LOGOUT: ("claude", ("auth", "logout"), "Claude CLI"),
     SetupOperationAction.CODEX_LOGIN: ("codex", ("login",), "Codex CLI"),
-    SetupOperationAction.CODEX_LOGOUT: ("codex", ("logout",), "Codex CLI"),
     SetupOperationAction.CURSOR_LOGIN: ("cursor-agent", ("login",), "Cursor CLI"),
     SetupOperationAction.CURSOR_LOGOUT: ("cursor-agent", ("logout",), "Cursor CLI"),
     SetupOperationAction.ANTIGRAVITY_LOGIN: ("agy", (), "Antigravity CLI"),
@@ -806,8 +801,6 @@ def _verify_action(
     if login_key is not None:
         return harness_cli_logged_in(login_key)
     logout_key = {
-        SetupOperationAction.CLAUDE_LOGOUT: ANTHROPIC_FAMILY,
-        SetupOperationAction.CODEX_LOGOUT: OPENAI_FAMILY,
         SetupOperationAction.CURSOR_LOGOUT: CURSOR_KEY,
     }.get(action)
     if logout_key is not None:

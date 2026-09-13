@@ -9,6 +9,8 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from tests._helpers.provider_setup_runtime import ProviderSetupRuntime
+
 _FAKE_BODY = """import json, os, sys
 from pathlib import Path
 root = Path(os.environ["PROVIDER_FIXTURE_ROOT"])
@@ -42,6 +44,30 @@ def prepare(root: Path, python: Path, tmux: Path) -> None:
     target = binary_dir / "tmux"
     if not target.exists():
         target.symlink_to(tmux)
+
+
+class ProviderSetupTerminalRuntime(ProviderSetupRuntime):
+    """Opt-in runtime permitting only reviewed tmux and the disposable dummy CLI."""
+
+    def __init__(self, root: Path, checkout: Path, *, tmux: Path, port: int | None = None):
+        super().__init__(root, checkout, port=port)
+        self.tmux = tmux.resolve(strict=True)
+
+    def prepare(self) -> None:
+        super().prepare()
+        prepare(self.root, self.python, self.tmux)
+
+    def environment(self, component: str) -> dict[str, str]:
+        env = super().environment(component)
+        env.update(
+            {
+                "PATH": str(self.root / "fixture-bin") + ":/usr/bin:/bin",
+                "PROVIDER_FIXTURE_TERMINAL": "1",
+                "PROVIDER_FIXTURE_TMUX": str(self.tmux),
+            }
+        )
+        env["OMNIGENT_RUNNER_ENV_PASSTHROUGH"] = ",".join(env)
+        return env
 
 
 def install(root: Path, socket_root: Path, python: Path, tmux: Path):

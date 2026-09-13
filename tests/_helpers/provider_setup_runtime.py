@@ -170,6 +170,9 @@ def install_guards() -> None:
     ambient._claude_login_detected = lambda: False
     ambient._ollama_reachable = lambda: False
     ambient.codex_config_detection = lambda: None
+    from omnigent.onboarding import providers
+
+    providers.default_chat_model = lambda *args, **kwargs: "fixture-model-no-vendor"
     import omnigent.onboarding.copilot_auth as copilot_auth
 
     copilot_auth.gh_cli_github_token = lambda *args, **kwargs: None

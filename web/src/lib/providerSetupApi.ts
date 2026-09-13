@@ -56,6 +56,13 @@ export interface SetupInventory {
   providers: SetupProvider[];
   key_providers: SetupKeyProvider[];
   acp_agents: SetupAcpAgent[];
+  /** Instruction-only built-in ACP entries from this host's standard setup catalog. */
+  builtin_acp?: {
+    id: string;
+    label: string;
+    install_command: string;
+    auth_instructions: string;
+  }[];
   harness_settings: SetupHarnessSettings;
   dismissed_detections: string[];
   effective_defaults: Record<string, string | null>;
@@ -84,10 +91,34 @@ export interface SetupImportPreview {
 export interface SetupDetectRequest {
   import_path?: string;
   import_source?: "openclaw" | "acpx";
+  harness?: SetupStatusHarness;
+}
+
+export type SetupStatusHarness =
+  | "claude-native"
+  | "codex-native"
+  | "cursor"
+  | "cursor-native"
+  | "opencode"
+  | "opencode-native"
+  | "pi-native"
+  | "antigravity"
+  | "antigravity-native"
+  | "copilot"
+  | "qwen"
+  | "goose"
+  | "hermes"
+  | "kiro"
+  | "kimi";
+
+export interface SetupHarnessStatus {
+  harness: SetupStatusHarness;
+  availability: boolean | "binary-missing" | "needs-auth" | "version-too-low";
 }
 
 export interface SetupDetection {
   providers: DetectedConnection[];
+  harness_status?: SetupHarnessStatus | null;
   imports: SetupImportPreview[];
   models: Record<string, string[]>;
   warnings?: string[];
@@ -100,12 +131,7 @@ interface Credential {
 }
 
 export type SetupAction =
-  | ({ action: "add_key"; provider: string; name?: string; model: string } & Credential)
-  | ({
-      action: "update_provider_credential";
-      name: string;
-      families: ProviderFamily[];
-    } & Credential)
+  | ({ action: "add_key"; provider: string; name?: string; model?: string | null } & Credential)
   | ({
       action: "add_gateway";
       name: string;
@@ -152,9 +178,7 @@ export interface SetupActionResult {
 
 export type SetupOperationAction =
   | "claude-login"
-  | "claude-logout"
   | "codex-login"
-  | "codex-logout"
   | "cursor-login"
   | "cursor-logout"
   | "antigravity-login"
@@ -177,6 +201,16 @@ export interface SetupOperation {
   error: string | null;
 }
 
+export class SetupApiError extends Error {
+  readonly status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "SetupApiError";
+    this.status = status;
+  }
+}
+
 async function setupFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await authenticatedFetch(path, init);
   if (!res.ok) {
@@ -190,7 +224,7 @@ async function setupFetch<T>(path: string, init?: RequestInit): Promise<T> {
     } catch {
       // Preserve the status line for non-JSON failures.
     }
-    throw new Error(detail || "Setup request failed");
+    throw new SetupApiError(detail || "Setup request failed", res.status);
   }
   return (await res.json()) as T;
 }

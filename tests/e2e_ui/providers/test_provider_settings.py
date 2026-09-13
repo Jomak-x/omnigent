@@ -36,7 +36,12 @@ def provider_runtime(tmp_path: Path, built_spa: None) -> Iterator[ProviderSetupR
 def _select_host(page: Page, name: str) -> None:
     page.get_by_test_id("settings-providers-host").click()
     page.get_by_role("option", name=f"Fixture computer {name} · online", exact=True).click()
-    expect(page.get_by_role("button", name="Add gateway", exact=True)).to_be_visible()
+    expect(page.get_by_test_id("setup-agent-codex")).to_be_visible()
+
+
+def _open_codex(page: Page) -> None:
+    page.get_by_test_id("setup-agent-codex").click()
+    expect(page.get_by_role("button", name="Compatible gateway", exact=True)).to_be_visible()
 
 
 def _config(runtime: ProviderSetupRuntime, host: str) -> dict:
@@ -113,8 +118,9 @@ def _exercise_settings_persist_on_selected_host_and_route_new_sessions(
     runtime = provider_runtime
     page.goto(runtime.url + "/settings/providers")
     expect(page.get_by_role("heading", name="Providers", exact=True)).to_be_visible()
-    expect(page.get_by_role("button", name="Add gateway", exact=True)).to_have_count(0)
+    expect(page.get_by_test_id("setup-agent-codex")).to_have_count(0)
     _select_host(page, "A")
+    _open_codex(page)
 
     existing = _create_session(runtime)
     httpx.post(
@@ -145,22 +151,23 @@ def _exercise_settings_persist_on_selected_host_and_route_new_sessions(
     assert any("provider-before-switch" in json.dumps(row) for row in _requests(runtime, "a"))
     assert not _requests(runtime, "b")
 
-    page.get_by_role("button", name="Add gateway", exact=True).click()
+    page.get_by_role("button", name="Compatible gateway", exact=True).click()
     page.get_by_label("Gateway name", exact=True).fill("ui-local-gateway")
     page.get_by_label("Base URL", exact=True).fill(f"http://127.0.0.1:{runtime.mock_ports[1]}/v1")
     page.get_by_label("Anthropic family", exact=True).uncheck()
     page.get_by_label("OpenAI model", exact=True).fill("gpt-4o-mini")
     page.get_by_label("API key or token", exact=True).fill("fixture-new-dummy-key")
     page.get_by_role("button", name="Save gateway", exact=True).click()
-    row = page.get_by_test_id("provider-row-ui-local-gateway")
+    row = page.get_by_test_id("agent-provider-row-ui-local-gateway")
     expect(row).to_be_visible()
-    row.get_by_role("button", name="Make default", exact=True).click()
-    expect(row.get_by_text("Default for OpenAI", exact=True)).to_be_visible()
+    row.get_by_role("button", name="Use for new Codex sessions", exact=True).click()
+    expect(row.get_by_text("Used for new sessions", exact=True)).to_be_visible()
 
     page.reload()
     expect(page.get_by_test_id("settings-providers-host")).to_contain_text("Fixture computer A")
-    row = page.get_by_test_id("provider-row-ui-local-gateway")
-    expect(row.get_by_text("Default for OpenAI", exact=True)).to_be_visible()
+    _open_codex(page)
+    row = page.get_by_test_id("agent-provider-row-ui-local-gateway")
+    expect(row.get_by_text("Used for new sessions", exact=True)).to_be_visible()
     config_a = _config(runtime, "host-a")
     assert config_a["providers"]["ui-local-gateway"]["default"] in (True, ["openai"], "openai")
     summary = runtime.read_cli_summary("host-a")
@@ -177,8 +184,10 @@ def _exercise_settings_persist_on_selected_host_and_route_new_sessions(
     assert "fixture-new-dummy-key" not in page.locator("body").inner_text()
 
     _select_host(page, "B")
-    expect(page.get_by_test_id("provider-row-ui-local-gateway")).to_have_count(0)
+    _open_codex(page)
+    expect(page.get_by_test_id("agent-provider-row-ui-local-gateway")).to_have_count(0)
     _select_host(page, "A")
+    _open_codex(page)
     fresh = _create_session(runtime)
     _send_and_expect(runtime, fresh, "provider-after-switch")
     assert any("provider-after-switch" in json.dumps(row) for row in _requests(runtime, "b"))
@@ -209,14 +218,16 @@ def _exercise_settings_persist_on_selected_host_and_route_new_sessions(
         "provider-existing-session" in json.dumps(row) for row in _requests(runtime, "b")
     )
 
-    row = page.get_by_test_id("provider-row-ui-local-gateway")
+    row = page.get_by_test_id("agent-provider-row-ui-local-gateway")
+    row.get_by_role("button", name="Manage", exact=True).click()
     row.get_by_role("button", name="Remove", exact=True).click()
     page.get_by_role("alertdialog", name="Remove ui-local-gateway").get_by_role(
         "button", name="Remove provider", exact=True
     ).click()
     expect(row).to_have_count(0)
     page.reload()
-    expect(page.get_by_test_id("provider-row-ui-local-gateway")).to_have_count(0)
+    _open_codex(page)
+    expect(page.get_by_test_id("agent-provider-row-ui-local-gateway")).to_have_count(0)
     assert "ui-local-gateway" not in _config(runtime, "host-a")["providers"]
 
 

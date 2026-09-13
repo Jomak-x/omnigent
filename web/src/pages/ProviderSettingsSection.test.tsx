@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 import { ProviderSettingsSection } from "./ProviderSettingsSection";
@@ -9,21 +9,39 @@ import { FALLBACK_SERVER_INFO } from "@/lib/capabilities";
 import { useHosts, type Host } from "@/hooks/useHosts";
 import {
   detectSetup,
+  fetchSetupOperation,
   fetchSetupInventory,
   runSetupAction,
   startSetupOperation,
   type SetupInventory,
+  type SetupOperation,
 } from "@/lib/providerSetupApi";
 
-vi.mock("@/hooks/useHosts", () => ({ useHosts: vi.fn() }));
+vi.mock("@/hooks/useHosts", () => ({
+  useHosts: vi.fn(),
+  useInstallHarness: () => ({ mutate: vi.fn(), isPending: false, isError: false }),
+}));
 vi.mock("@/lib/providerSetupApi", () => ({
   detectSetup: vi.fn(),
+  fetchSetupOperation: vi.fn(),
   fetchSetupInventory: vi.fn(),
   runSetupAction: vi.fn(),
   startSetupOperation: vi.fn(),
 }));
 vi.mock("@/components/ProviderSetupTerminal", () => ({
-  ProviderSetupTerminal: () => <div data-testid="setup-terminal" />,
+  ProviderSetupTerminal: ({
+    operation,
+    onOperationChange,
+  }: {
+    operation: { operation_id: string; state: string };
+    onOperationChange: (operation: unknown) => void;
+  }) => (
+    <div data-testid="setup-terminal">
+      <button type="button" onClick={() => onOperationChange({ ...operation })}>
+        Simulate operation poll
+      </button>
+    </div>
+  ),
 }));
 vi.mock("@/shell/HarnessSetupDialog", () => ({
   HarnessSetupDialog: () => null,
@@ -69,9 +87,11 @@ vi.mock("@/components/ui/select", () => ({
 
 const useHostsMock = vi.mocked(useHosts);
 const fetchInventoryMock = vi.mocked(fetchSetupInventory);
+const fetchSetupOperationMock = vi.mocked(fetchSetupOperation);
 const detectSetupMock = vi.mocked(detectSetup);
 const runSetupActionMock = vi.mocked(runSetupAction);
 const startSetupOperationMock = vi.mocked(startSetupOperation);
+const scrollIntoViewMock = vi.fn();
 
 const online = (host_id: string, name = host_id): Host => ({
   host_id,
@@ -123,6 +143,18 @@ function hostSelect(): HTMLSelectElement {
   return screen.getAllByTestId("mock-select")[0] as HTMLSelectElement;
 }
 
+async function openAdvanced(task: string) {
+  fireEvent.click(await screen.findByText("Advanced provider tools"));
+  fireEvent.click(screen.getByRole("button", { name: new RegExp(`^${task}`) }));
+}
+
+async function openAgent(id: string) {
+  if (!["claude", "codex", "cursor", "opencode", "pi"].includes(id)) {
+    fireEvent.click(await screen.findByRole("button", { name: "More agents" }));
+  }
+  fireEvent.click(await screen.findByTestId(`setup-agent-${id}`));
+}
+
 function actionResult(hostId: string, message = "Saved") {
   return { ok: true, message, inventory: inventories.get(hostId) ?? inventory() };
 }
@@ -131,14 +163,21 @@ let hosts: Host[] | undefined;
 let inventories: Map<string, SetupInventory>;
 
 beforeEach(() => {
+  Object.defineProperty(Element.prototype, "scrollIntoView", {
+    configurable: true,
+    value: scrollIntoViewMock,
+  });
   localStorage.clear();
+  sessionStorage.clear();
   hosts = [];
   inventories = new Map();
   useHostsMock.mockReset();
   fetchInventoryMock.mockReset();
+  fetchSetupOperationMock.mockReset();
   detectSetupMock.mockReset();
   runSetupActionMock.mockReset();
   startSetupOperationMock.mockReset();
+  scrollIntoViewMock.mockReset();
   useHostsMock.mockImplementation(
     () =>
       ({
@@ -158,11 +197,523 @@ beforeEach(() => {
     exit_code: null,
     error: null,
   });
+  fetchSetupOperationMock.mockResolvedValue({
+    operation_id: "op-1",
+    state: "running",
+    action: "codex-login",
+    exit_code: null,
+    error: null,
+  });
 });
 
 afterEach(() => cleanup());
 
 describe("ProviderSettingsSection", () => {
+  it("shows one agent list and opens a scoped Codex key form in the first preview", async () => {
+    hosts = [online("mac", "Mac")];
+    inventories.set("mac", inventory());
+    renderSection();
+
+    expect(await screen.findByText("Claude Code")).toBeInTheDocument();
+    for (const label of ["Codex", "Cursor", "OpenCode", "Pi"]) {
+      expect(screen.getByText(label)).toBeInTheDocument();
+    }
+    expect(screen.getByText("Advanced provider tools").closest("details")).not.toHaveAttribute(
+      "open",
+    );
+    fireEvent.click(screen.getByText("Codex"));
+    expect(screen.getByRole("button", { name: "Back to agents" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "API key" }));
+    expect(detectSetupMock).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByLabelText("API key"), { target: { value: "test-only-key" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save provider" }));
+    await waitFor(() =>
+      expect(runSetupActionMock).toHaveBeenCalledWith("mac", {
+        action: "add_key",
+        provider: "openai",
+        name: undefined,
+        secret: "test-only-key",
+      }),
+    );
+    expect(screen.queryByLabelText("API key")).toBeNull();
+  });
+
+  it("keeps a started Codex sign-in inside its agent detail", async () => {
+    hosts = [{ ...online("mac", "Mac"), configured_harnesses: { "codex-native": false } }];
+    inventories.set("mac", inventory({ supported_operations: ["codex-login"] }));
+    renderSection();
+
+    fireEvent.click(await screen.findByText("Codex"));
+    expect(screen.queryByText("Install Codex")).toBeNull();
+    expect(screen.getByRole("button", { name: "ChatGPT subscription" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "ChatGPT subscription" }));
+    await waitFor(() =>
+      expect(startSetupOperationMock).toHaveBeenCalledWith("mac", "codex-login", {}),
+    );
+    expect(await screen.findByTestId("setup-terminal")).toBeInTheDocument();
+    expect(sessionStorage.getItem("omnigent:provider-setup-operation:mac")).toBe("op-1");
+  });
+
+  it("offers Pi's existing gateway and scopes Databricks to Pi across reload", async () => {
+    hosts = [online("mac")];
+    inventories.set("mac", inventory({ supported_operations: ["databricks-configure"] }));
+    startSetupOperationMock.mockResolvedValue({
+      operation_id: "op-pi",
+      state: "running",
+      action: "databricks-configure",
+      exit_code: null,
+      error: null,
+    });
+    const first = renderSection();
+
+    await openAgent("pi");
+    expect(screen.getByRole("button", { name: "Compatible gateway" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "Databricks" }));
+    expect(screen.getByRole("checkbox", { name: "pi" })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "claude" })).not.toBeChecked();
+    fireEvent.change(screen.getByLabelText("Workspace URL"), {
+      target: { value: "https://workspace.example.com" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^configure$/i }));
+    await waitFor(() =>
+      expect(startSetupOperationMock).toHaveBeenCalledWith("mac", "databricks-configure", {
+        workspace_url: "https://workspace.example.com",
+        agents: ["pi"],
+      }),
+    );
+    expect(screen.getByTestId("setup-terminal")).toBeInTheDocument();
+    expect(sessionStorage.getItem("omnigent:provider-setup-operation:mac:agent")).toBe("pi");
+
+    first.unmount();
+    fetchSetupOperationMock.mockResolvedValue({
+      operation_id: "op-pi",
+      state: "running",
+      action: "databricks-configure",
+      exit_code: null,
+      error: null,
+    });
+    renderSection();
+    expect(await screen.findByTestId("setup-terminal")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Pi" })).toBeInTheDocument();
+  });
+
+  it("keeps Claude, Codex, and Bedrock connections out of Pi's saved defaults", async () => {
+    hosts = [online("mac", "Mac")];
+    inventories.set(
+      "mac",
+      inventory({
+        providers: [
+          {
+            name: "claude-subscription",
+            kind: "subscription",
+            families: ["anthropic"],
+            defaults: ["anthropic"],
+            default_scopes: ["anthropic"],
+            credential_sources: {},
+            models: {},
+            base_urls: {},
+          },
+          {
+            name: "codex-subscription",
+            kind: "subscription",
+            families: ["openai"],
+            defaults: ["openai"],
+            default_scopes: ["openai"],
+            credential_sources: {},
+            models: {},
+            base_urls: {},
+          },
+          {
+            name: "bedrock",
+            kind: "bedrock",
+            families: ["anthropic"],
+            defaults: [],
+            default_scopes: ["anthropic"],
+            credential_sources: {},
+            models: {},
+            base_urls: {},
+          },
+        ],
+        effective_defaults: {
+          anthropic: "claude-subscription",
+          openai: "codex-subscription",
+          pi: null,
+        },
+      }),
+    );
+    renderSection();
+
+    expect(await screen.findByTestId("setup-agent-pi")).toHaveTextContent("Choose how to connect");
+    await openAgent("pi");
+    expect(screen.queryByText("Saved connections")).toBeNull();
+    expect(screen.queryByText("Used for new sessions")).toBeNull();
+    expect(screen.queryByRole("button", { name: /Use for new Pi sessions/ })).toBeNull();
+    expect(screen.getByRole("button", { name: "Pi subscription" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Back to agents" }));
+    await openAgent("claude");
+    expect(screen.getByTestId("agent-provider-row-claude-subscription")).toHaveTextContent(
+      "Used for new sessions",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Back to agents" }));
+    await openAgent("codex");
+    expect(screen.getByTestId("agent-provider-row-codex-subscription")).toHaveTextContent(
+      "Used for new sessions",
+    );
+  });
+
+  it("uses the Pi scope for its default action while advanced keeps its scope picker", async () => {
+    hosts = [online("mac", "Mac")];
+    inventories.set(
+      "mac",
+      inventory({
+        providers: [
+          {
+            name: "pi-subscription",
+            kind: "subscription",
+            families: [],
+            defaults: ["pi"],
+            default_scopes: ["pi"],
+            credential_sources: {},
+            models: {},
+            base_urls: {},
+          },
+          {
+            name: "dual-gateway",
+            kind: "gateway",
+            families: ["anthropic", "openai"],
+            defaults: ["openai"],
+            default_scopes: ["anthropic", "openai", "pi"],
+            credential_sources: {},
+            models: {},
+            base_urls: {},
+          },
+        ],
+        effective_defaults: { pi: "pi-subscription", openai: "dual-gateway" },
+      }),
+    );
+    renderSection();
+
+    expect(await screen.findByTestId("setup-agent-pi")).toHaveTextContent("2 saved connections");
+    await openAgent("pi");
+    expect(screen.getByTestId("agent-provider-row-pi-subscription")).toHaveTextContent(
+      "Used for new sessions",
+    );
+    const gateway = screen.getByTestId("agent-provider-row-dual-gateway");
+    expect(gateway).not.toHaveTextContent("Used for new sessions");
+    expect(
+      screen.getByText(/Changing the default affects new Pi sessions on Mac/),
+    ).toBeInTheDocument();
+    fireEvent.click(within(gateway).getByRole("button", { name: "Use for new Pi sessions" }));
+    await waitFor(() =>
+      expect(runSetupActionMock).toHaveBeenCalledWith("mac", {
+        action: "set_default",
+        name: "dual-gateway",
+        surface: "pi",
+      }),
+    );
+
+    await openAdvanced("Manage all connections");
+    const advancedGateway = screen.getByTestId("provider-row-dual-gateway");
+    fireEvent.change(within(advancedGateway).getByTestId("mock-select"), {
+      target: { value: "anthropic" },
+    });
+    fireEvent.click(within(advancedGateway).getByRole("button", { name: "Make default" }));
+    await waitFor(() =>
+      expect(runSetupActionMock).toHaveBeenCalledWith("mac", {
+        action: "set_default",
+        name: "dual-gateway",
+        surface: "anthropic",
+      }),
+    );
+  });
+
+  it("keeps both Anthropic and OpenAI API-key vendors available to Pi", async () => {
+    hosts = [online("mac")];
+    inventories.set(
+      "mac",
+      inventory({
+        key_providers: [
+          { id: "anthropic", label: "Anthropic", family: "anthropic", base_url: "" },
+          { id: "openai", label: "OpenAI", family: "openai", base_url: "" },
+        ],
+      }),
+    );
+    renderSection();
+
+    await openAgent("pi");
+    fireEvent.click(screen.getByRole("button", { name: "API key" }));
+    expect(
+      within(screen.getByLabelText("Vendor")).getByRole("option", { name: "Anthropic" }),
+    ).toBeInTheDocument();
+    expect(
+      within(screen.getByLabelText("Vendor")).getByRole("option", { name: "OpenAI" }),
+    ).toBeInTheDocument();
+  });
+
+  it("scopes detection results and Claude's Keychain notice to relevant agents", async () => {
+    hosts = [online("mac")];
+    inventories.set("mac", inventory());
+    detectSetupMock.mockResolvedValue({
+      providers: [
+        { name: "claude-login", kind: "subscription", family: "anthropic", source: "fixture" },
+        { name: "codex-login", kind: "subscription", family: "openai", source: "fixture" },
+        { name: "pi-login", kind: "subscription", family: "pi", source: "fixture" },
+        { name: "anthropic-key", kind: "key", family: "anthropic", source: "fixture" },
+        { name: "openai-gateway", kind: "gateway", family: "openai", source: "fixture" },
+        { name: "bedrock", kind: "bedrock", family: "anthropic", source: "fixture" },
+      ],
+      imports: [],
+      models: {},
+      warnings: [
+        "Claude logins stored only in the OS Keychain are checked through guided sign-in, not detection.",
+        "Some host connections could not be inspected",
+      ],
+    });
+    renderSection();
+
+    await openAgent("pi");
+    fireEvent.click(screen.getByRole("button", { name: "Find credentials on this computer" }));
+    const piResults = await screen.findByTestId("provider-detection-results");
+    for (const name of ["pi-login", "anthropic-key", "openai-gateway"]) {
+      expect(within(piResults).getByText(name)).toBeInTheDocument();
+    }
+    for (const name of ["claude-login", "codex-login", "bedrock"]) {
+      expect(within(piResults).queryByText(name)).toBeNull();
+    }
+    expect(within(piResults).queryByText(/Claude logins stored only/)).toBeNull();
+    expect(
+      within(piResults).getByText("Some host connections could not be inspected"),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Back to agents" }));
+    await openAgent("claude");
+    const claudeResults = screen.getByTestId("provider-detection-results");
+    expect(within(claudeResults).getByText(/Claude logins stored only/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Back to agents" }));
+    await openAgent("opencode");
+    expect(screen.queryByRole("button", { name: "Find credentials on this computer" })).toBeNull();
+    expect(screen.queryByTestId("provider-detection-results")).toBeNull();
+  });
+
+  it("uses Antigravity native readiness instead of the SDK's availability", async () => {
+    hosts = [
+      {
+        ...online("mac"),
+        configured_harnesses: { antigravity: true, "antigravity-native": "needs-auth" },
+      },
+    ];
+    inventories.set("mac", inventory());
+    renderSection();
+
+    await openAgent("antigravity");
+    expect(screen.getByText("Sign-in needed · mac")).toBeInTheDocument();
+    expect(screen.queryByText("Ready on this computer · mac")).toBeNull();
+    expect(screen.getByRole("button", { name: "Sign in to Antigravity" })).toBeInTheDocument();
+  });
+
+  it("does not claim a vendor sign-in when harness status is missing", async () => {
+    hosts = [online("mac")];
+    inventories.set("mac", inventory());
+    renderSection();
+
+    await openAgent("codex");
+    expect(screen.getByText("Sign-in status not checked · mac")).toBeInTheDocument();
+  });
+
+  it("checks only the selected native harness on the selected computer", async () => {
+    hosts = [online("mac", "Mac"), online("linux", "Linux")];
+    localStorage.setItem("omnigent:provider-settings-host", "mac");
+    inventories.set("mac", inventory());
+    inventories.set("linux", inventory());
+    detectSetupMock.mockImplementation(async (_hostId, request) => ({
+      providers: [],
+      imports: [],
+      models: {},
+      harness_status: { harness: request?.harness ?? "antigravity-native", availability: true },
+    }));
+    renderSection();
+
+    await openAgent("antigravity");
+    expect(detectSetupMock).not.toHaveBeenCalled();
+    expect(screen.getByText("Sign-in status not checked · Mac")).toBeInTheDocument();
+    expect(screen.getByText(/Uses the CLI’s setup checks/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Check setup status" }));
+    await waitFor(() =>
+      expect(detectSetupMock).toHaveBeenCalledWith("mac", { harness: "antigravity-native" }),
+    );
+    expect(await screen.findByText("Ready according to setup · Mac")).toBeInTheDocument();
+
+    fireEvent.change(hostSelect(), { target: { value: "linux" } });
+    await openAgent("antigravity");
+    expect(screen.getByText("Sign-in status not checked · Linux")).toBeInTheDocument();
+    expect(detectSetupMock).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole("button", { name: "Check setup status" }));
+    await waitFor(() =>
+      expect(detectSetupMock).toHaveBeenCalledWith("linux", { harness: "antigravity-native" }),
+    );
+    expect(await screen.findByText("Ready according to setup · Linux")).toBeInTheDocument();
+  });
+
+  it("keeps credential discovery after a status check and clears failed checked status", async () => {
+    hosts = [{ ...online("mac"), configured_harnesses: { "codex-native": true } }];
+    inventories.set("mac", inventory());
+    detectSetupMock
+      .mockResolvedValueOnce({
+        providers: [{ name: "openai-key", kind: "key", family: "openai", source: "fixture" }],
+        imports: [],
+        models: {},
+      })
+      .mockResolvedValueOnce({
+        providers: [],
+        imports: [],
+        models: {},
+        harness_status: { harness: "codex-native", availability: true },
+      })
+      .mockResolvedValueOnce({
+        providers: [],
+        imports: [],
+        models: {},
+        warnings: ["The requested harness status could not be checked on this computer"],
+      });
+    renderSection();
+
+    await openAgent("codex");
+    fireEvent.click(screen.getByRole("button", { name: "Find credentials on this computer" }));
+    expect(await screen.findByText("openai-key")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Check setup status" }));
+    expect(await screen.findByText("Ready according to setup · mac")).toBeInTheDocument();
+    await waitFor(() => expect(fetchInventoryMock).toHaveBeenCalledTimes(2));
+    expect(screen.getByText("openai-key")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Check setup status" }));
+    expect(
+      await screen.findByText("The requested harness status could not be checked on this computer"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Ready according to setup · mac")).toBeNull();
+    expect(screen.queryByText("Available on this computer · mac")).toBeNull();
+    expect(screen.getByText("Status check failed · mac")).toBeInTheDocument();
+    expect(screen.getByText("openai-key")).toBeInTheDocument();
+  });
+
+  it.each([
+    [false, "Installation needed"],
+    ["binary-missing", "Installation needed"],
+    ["needs-auth", "Sign-in or configuration needed"],
+    ["version-too-low", "Update needed"],
+  ] as const)("shows a checked %s setup result as %s", async (availability, label) => {
+    hosts = [online("mac")];
+    inventories.set("mac", inventory());
+    detectSetupMock.mockResolvedValue({
+      providers: [],
+      imports: [],
+      models: {},
+      harness_status: { harness: "codex-native", availability },
+    });
+    renderSection();
+
+    await openAgent("codex");
+    fireEvent.click(screen.getByRole("button", { name: "Check setup status" }));
+    expect(await screen.findByText(`${label} · mac`)).toBeInTheDocument();
+  });
+
+  it("discards checked readiness when setup changes or a guided sign-in starts", async () => {
+    hosts = [online("mac")];
+    inventories.set(
+      "mac",
+      inventory({
+        providers: [
+          {
+            name: "openai-key",
+            kind: "key",
+            families: ["openai"],
+            defaults: [],
+            default_scopes: ["openai", "pi"],
+            credential_sources: {},
+            models: {},
+            base_urls: {},
+          },
+        ],
+      }),
+    );
+    detectSetupMock.mockResolvedValue({
+      providers: [],
+      imports: [],
+      models: {},
+      harness_status: { harness: "codex-native", availability: true },
+    });
+    renderSection();
+
+    await openAgent("codex");
+    fireEvent.click(screen.getByRole("button", { name: "Check setup status" }));
+    expect(await screen.findByText("Ready according to setup · mac")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Use for new Codex sessions" }));
+    await waitFor(() =>
+      expect(runSetupActionMock).toHaveBeenCalledWith("mac", {
+        action: "set_default",
+        name: "openai-key",
+        surface: "openai",
+      }),
+    );
+    expect(screen.queryByText("Ready according to setup · mac")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Check setup status" }));
+    expect(await screen.findByText("Ready according to setup · mac")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "ChatGPT subscription" }));
+    await waitFor(() => expect(startSetupOperationMock).toHaveBeenCalled());
+    expect(screen.queryByText("Ready according to setup · mac")).toBeNull();
+  });
+
+  it("reveals only the selected advanced task and the host's built-in ACP instructions", async () => {
+    hosts = [online("mac")];
+    inventories.set(
+      "mac",
+      inventory({
+        builtin_acp: [
+          {
+            id: "devin",
+            label: "Devin",
+            install_command: "Install Devin CLI from the vendor",
+            auth_instructions: "Run devin auth login",
+          },
+        ],
+      }),
+    );
+    renderSection();
+
+    fireEvent.click(await screen.findByText("Advanced provider tools"));
+    expect(screen.queryByRole("button", { name: "Save host" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /^Import ACP agents/ }));
+    expect(screen.getByRole("button", { name: "Preview import" })).toBeInTheDocument();
+    expect(detectSetup).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Find existing configuration" }));
+    await waitFor(() => expect(detectSetup).toHaveBeenCalledWith("mac", undefined));
+    expect(
+      await screen.findByText("No importable agents found. You can try a configuration path."),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Add provider" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Back to tools" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Add a provider/ }));
+    expect(screen.getByRole("button", { name: "Add provider" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Preview import" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "More agents" }));
+    fireEvent.click(screen.getByTestId("setup-agent-devin"));
+    expect(screen.getByText("Install Devin CLI from the vendor")).toBeInTheDocument();
+    expect(screen.getByText("Run devin auth login")).toBeInTheDocument();
+  });
+
+  it("explains when a host cannot offer an installed agent's sign-in command", async () => {
+    hosts = [{ ...online("mac", "Mac"), configured_harnesses: { "claude-native": "needs-auth" } }];
+    inventories.set("mac", inventory({ supported_operations: ["codex-login"] }));
+    renderSection();
+
+    fireEvent.click(await screen.findByText("Claude Code"));
+    expect(screen.getByRole("button", { name: "Claude subscription" })).toBeDisabled();
+    expect(screen.getByText(/Claude Code setup command is unavailable on Mac/)).toBeInTheDocument();
+    expect(screen.queryByText("Install Claude Code")).toBeNull();
+  });
+
   it("selects the sole online computer and renders its inventory", async () => {
     hosts = [online("mac", "Jakob's Mac")];
     inventories.set(
@@ -186,6 +737,7 @@ describe("ProviderSettingsSection", () => {
 
     renderSection();
 
+    await openAdvanced("Manage all connections");
     expect(await screen.findByText("work-openai")).toBeInTheDocument();
     expect(fetchInventoryMock).toHaveBeenCalledWith("mac", expect.any(AbortSignal));
     expect(hostSelect().value).toBe("mac");
@@ -258,6 +810,7 @@ describe("ProviderSettingsSection", () => {
     );
     renderSection(false);
 
+    await openAdvanced("Manage all connections");
     expect(await screen.findByText("read-only-provider")).toBeInTheDocument();
     expect(screen.getByText(/Provider setup changes are disabled/)).toBeInTheDocument();
     expect(
@@ -271,7 +824,7 @@ describe("ProviderSettingsSection", () => {
     inventories.set("mac", inventory());
     renderSection();
 
-    await screen.findByRole("button", { name: /detect credentials/i });
+    await openAdvanced("Manage all connections");
     expect(detectSetupMock).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: /detect credentials/i }));
     await waitFor(() => expect(detectSetupMock).toHaveBeenCalledWith("mac", undefined));
@@ -297,7 +850,7 @@ describe("ProviderSettingsSection", () => {
     });
     renderSection();
 
-    fireEvent.click(await screen.findByRole("button", { name: /advanced provider tools/i }));
+    await openAdvanced("Import ACP agents");
     fireEvent.change(screen.getByLabelText("Configuration path"), {
       target: { value: "/tmp/openclaw.json" },
     });
@@ -323,17 +876,18 @@ describe("ProviderSettingsSection", () => {
     );
   });
 
-  it("requires a model for keys and clears then closes the secret form after acknowledgement", async () => {
+  it("accepts an optional model override and clears the key after acknowledgement", async () => {
     hosts = [online("mac")];
     inventories.set("mac", inventory());
     renderSection();
 
-    await screen.findByRole("button", { name: /add provider/i });
+    await openAdvanced("Add a provider");
     fireEvent.click(screen.getByRole("button", { name: /add provider/i }));
     const save = screen.getByRole("button", { name: /save provider/i });
     expect(save).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "More options" }));
     fireEvent.change(screen.getByLabelText("Default model"), { target: { value: "gpt-5.6" } });
-    fireEvent.change(screen.getByLabelText("API key or token"), {
+    fireEvent.change(screen.getByLabelText("API key"), {
       target: { value: "super-secret" },
     });
     fireEvent.click(save);
@@ -352,7 +906,7 @@ describe("ProviderSettingsSection", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: /add provider/i }));
-    expect(screen.getByLabelText("API key or token")).toHaveValue("");
+    expect(screen.getByLabelText("API key")).toHaveValue("");
   });
 
   it("sends gateway families, models, selected protocol, and credential payload", async () => {
@@ -360,7 +914,7 @@ describe("ProviderSettingsSection", () => {
     inventories.set("mac", inventory());
     renderSection();
 
-    await screen.findByRole("button", { name: /add gateway/i });
+    await openAdvanced("Add a provider");
     fireEvent.click(screen.getByRole("button", { name: /add gateway/i }));
     fireEvent.change(screen.getByLabelText("Gateway name"), { target: { value: "relay" } });
     fireEvent.change(screen.getByLabelText("Base URL"), {
@@ -396,7 +950,8 @@ describe("ProviderSettingsSection", () => {
     inventories.set("mac", inventory());
     renderSection();
 
-    fireEvent.click(await screen.findByRole("button", { name: /add bedrock/i }));
+    await openAdvanced("Add a provider");
+    fireEvent.click(screen.getByRole("button", { name: /add bedrock/i }));
     fireEvent.change(screen.getByLabelText("Model ID"), {
       target: { value: "anthropic.claude-sonnet" },
     });
@@ -423,15 +978,29 @@ describe("ProviderSettingsSection", () => {
       "mac",
       inventory({ supported_operations: ["codex-login", "databricks-configure"] }),
     );
+    startSetupOperationMock
+      .mockResolvedValueOnce({
+        operation_id: "op-codex",
+        state: "succeeded",
+        action: "codex-login",
+        exit_code: 0,
+        error: null,
+      })
+      .mockResolvedValueOnce({
+        operation_id: "op-databricks",
+        state: "running",
+        action: "databricks-configure",
+        exit_code: null,
+        error: null,
+      });
     renderSection();
 
-    fireEvent.click(await screen.findByRole("button", { name: /^sign in$/i }));
+    await openAgent("codex");
+    fireEvent.click(screen.getByRole("button", { name: "ChatGPT subscription" }));
     await waitFor(() =>
       expect(startSetupOperationMock).toHaveBeenCalledWith("mac", "codex-login", {}),
     );
-    expect(screen.getAllByRole("button", { name: /sign in unavailable/i }).length).toBeGreaterThan(
-      0,
-    );
+    fireEvent.click(screen.getByRole("button", { name: "Databricks" }));
 
     fireEvent.change(screen.getByLabelText("Workspace URL"), {
       target: { value: "https://workspace.example.com" },
@@ -440,9 +1009,146 @@ describe("ProviderSettingsSection", () => {
     await waitFor(() =>
       expect(startSetupOperationMock).toHaveBeenCalledWith("mac", "databricks-configure", {
         workspace_url: "https://workspace.example.com",
-        agents: ["claude", "codex"],
+        agents: ["codex"],
       }),
     );
+  });
+
+  it("reveals a newly started operation once and locks competing setup actions", async () => {
+    hosts = [online("mac")];
+    inventories.set(
+      "mac",
+      inventory({ supported_operations: ["codex-login", "databricks-configure"] }),
+    );
+    renderSection();
+
+    await openAgent("codex");
+    fireEvent.click(screen.getByRole("button", { name: "Databricks" }));
+    fireEvent.click(screen.getByRole("button", { name: "ChatGPT subscription" }));
+
+    await waitFor(() =>
+      expect(scrollIntoViewMock).toHaveBeenCalledWith({ behavior: "smooth", block: "center" }),
+    );
+    expect(scrollIntoViewMock).toHaveBeenCalledOnce();
+    expect(
+      screen.getByRole("button", { name: /find credentials on this computer/i }),
+    ).toBeDisabled();
+    expect(screen.getByRole("button", { name: "ChatGPT subscription" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /configure$/i })).toBeDisabled();
+
+    fireEvent.click(screen.getByRole("button", { name: /simulate operation poll/i }));
+    await waitFor(() => expect(screen.getByTestId("setup-terminal")).toBeInTheDocument());
+    expect(scrollIntoViewMock).toHaveBeenCalledOnce();
+  });
+
+  it("restores an active operation after the settings page remounts", async () => {
+    hosts = [online("mac")];
+    inventories.set("mac", inventory({ supported_operations: ["codex-login"] }));
+    const first = renderSection();
+
+    await openAgent("codex");
+    fireEvent.click(screen.getByRole("button", { name: "ChatGPT subscription" }));
+    await waitFor(() =>
+      expect(sessionStorage.getItem("omnigent:provider-setup-operation:mac")).toBe("op-1"),
+    );
+    first.unmount();
+    scrollIntoViewMock.mockReset();
+    let finishRecovery!: (operation: SetupOperation) => void;
+    fetchSetupOperationMock.mockImplementationOnce(
+      () =>
+        new Promise<SetupOperation>((resolve) => {
+          finishRecovery = resolve;
+        }),
+    );
+
+    renderSection();
+
+    expect(await screen.findByText("Restoring setup operation…")).toBeInTheDocument();
+    await openAdvanced("Manage all connections");
+    expect(screen.getByRole("button", { name: /detect credentials/i })).toBeDisabled();
+    finishRecovery({
+      operation_id: "op-1",
+      state: "running",
+      action: "codex-login",
+      exit_code: null,
+      error: null,
+    });
+    await waitFor(() =>
+      expect(fetchSetupOperationMock).toHaveBeenCalledWith("mac", "op-1", expect.any(AbortSignal)),
+    );
+    expect(await screen.findByTestId("setup-terminal")).toBeInTheDocument();
+    expect(scrollIntoViewMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps recovered operations isolated to their original computer", async () => {
+    hosts = [online("mac", "Mac"), online("linux", "Linux")];
+    inventories.set("mac", inventory());
+    inventories.set("linux", inventory());
+    localStorage.setItem("omnigent:provider-settings-host", "mac");
+    sessionStorage.setItem("omnigent:provider-setup-operation:mac", "op-mac");
+    fetchSetupOperationMock.mockResolvedValue({
+      operation_id: "op-mac",
+      state: "running",
+      action: "codex-login",
+      exit_code: null,
+      error: null,
+    });
+    renderSection();
+
+    expect(await screen.findByTestId("setup-terminal")).toBeInTheDocument();
+    fireEvent.change(hostSelect(), { target: { value: "linux" } });
+
+    await waitFor(() => expect(screen.queryByTestId("setup-terminal")).toBeNull());
+    expect(fetchSetupOperationMock).toHaveBeenCalledTimes(1);
+    expect(fetchSetupOperationMock).toHaveBeenCalledWith("mac", "op-mac", expect.any(AbortSignal));
+    expect(sessionStorage.getItem("omnigent:provider-setup-operation:mac")).toBe("op-mac");
+  });
+
+  it("clears a stale remembered operation after host revalidation", async () => {
+    hosts = [online("mac")];
+    inventories.set("mac", inventory({ supported_operations: ["codex-login"] }));
+    sessionStorage.setItem("omnigent:provider-setup-operation:mac", "op-stale");
+    fetchSetupOperationMock.mockRejectedValue(
+      Object.assign(new Error("Unknown setup operation"), { status: 404 }),
+    );
+    renderSection();
+
+    await waitFor(() =>
+      expect(sessionStorage.getItem("omnigent:provider-setup-operation:mac")).toBeNull(),
+    );
+    expect(screen.queryByTestId("setup-terminal")).toBeNull();
+    await openAgent("codex");
+    expect(screen.getByRole("button", { name: "ChatGPT subscription" })).toBeEnabled();
+    expect(screen.queryByText(/could not be restored/i)).toBeNull();
+  });
+
+  it("does not offer managed credential rotation for subscription providers", async () => {
+    hosts = [online("mac")];
+    inventories.set(
+      "mac",
+      inventory({
+        providers: [
+          {
+            name: "codex-subscription",
+            kind: "subscription",
+            families: ["openai"],
+            defaults: ["openai"],
+            default_scopes: ["openai"],
+            credential_sources: {},
+            models: { openai: "gpt-5.6-codex" },
+            base_urls: {},
+          },
+        ],
+      }),
+    );
+    renderSection();
+
+    await openAdvanced("Manage all connections");
+    const row = await screen.findByTestId("provider-row-codex-subscription");
+    expect(within(row).getByText("codex-subscription")).toBeInTheDocument();
+    expect(within(row).getByText("subscription")).toBeInTheDocument();
+    expect(within(row).queryByRole("button", { name: /update credential/i })).toBeNull();
+    expect(screen.getByText("Advanced provider tools")).toBeInTheDocument();
   });
 
   it("writes harness keys and per-harness model settings through typed actions", async () => {
@@ -450,7 +1156,9 @@ describe("ProviderSettingsSection", () => {
     inventories.set("mac", inventory());
     renderSection();
 
-    fireEvent.click((await screen.findAllByRole("button", { name: /^add key$/i }))[0]);
+    await openAgent("cursor");
+    fireEvent.click(screen.getByRole("button", { name: "Cursor API key" }));
+    fireEvent.click(screen.getByRole("button", { name: /^add key$/i }));
     fireEvent.change(screen.getByLabelText("Environment variable"), {
       target: { value: "CURSOR_API_KEY" },
     });
@@ -463,6 +1171,9 @@ describe("ProviderSettingsSection", () => {
       }),
     );
 
+    fireEvent.click(screen.getByRole("button", { name: "Back to agents" }));
+    await openAgent("opencode");
+    fireEvent.click(screen.getByRole("button", { name: "Default model" }));
     fireEvent.change(screen.getByLabelText(/^OpenCode default model/), {
       target: { value: "openai/gpt-5.6" },
     });
@@ -497,6 +1208,7 @@ describe("ProviderSettingsSection", () => {
     );
     renderSection();
 
+    await openAdvanced("Manage all connections");
     await screen.findByText("risky-gateway");
     fireEvent.click(screen.getByRole("button", { name: /^remove$/i }));
     expect(screen.getByRole("alertdialog", { name: /remove risky-gateway/i })).toHaveTextContent(
@@ -535,10 +1247,12 @@ describe("ProviderSettingsSection", () => {
     );
     renderSection();
 
-    await screen.findByRole("button", { name: /add provider/i });
+    await openAdvanced("Add a provider");
     fireEvent.click(screen.getByRole("button", { name: /add provider/i }));
+    fireEvent.click(screen.getByRole("button", { name: "More options" }));
     expect(screen.getByLabelText("Default model")).toBeInTheDocument();
     fireEvent.change(hostSelect(), { target: { value: "linux" } });
+    await openAgent("codex");
     expect(await screen.findByText("linux-only")).toBeInTheDocument();
     expect(screen.queryByLabelText("Default model")).toBeNull();
   });
@@ -576,6 +1290,7 @@ describe("ProviderSettingsSection", () => {
       expect(fetchInventoryMock).toHaveBeenCalledWith("mac", expect.any(AbortSignal)),
     );
     fireEvent.change(hostSelect(), { target: { value: "linux" } });
+    await openAdvanced("Manage all connections");
     expect(await screen.findByText("linux-only")).toBeInTheDocument();
     resolveMac(
       inventory({

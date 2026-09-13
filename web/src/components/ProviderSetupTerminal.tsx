@@ -78,7 +78,7 @@ function stateMessage(operation: SetupOperation): string {
     case "running":
       return "Follow the command output below. This view updates while setup runs.";
     case "succeeded":
-      return "The guided command exited. Provider status is refreshing.";
+      return "The guided command exited. Review the local provider status below for any saved changes.";
     case "failed":
       return operation.error
         ? "The setup command did not complete."
@@ -88,7 +88,7 @@ function stateMessage(operation: SetupOperation): string {
     case "cancelled":
       return "The setup command was cancelled.";
     case "expired":
-      return "The setup operation expired before it could be attached.";
+      return "The setup operation timed out and was stopped. Start the setup again to continue.";
   }
 }
 
@@ -97,6 +97,7 @@ function errorMessage(error: unknown, fallback: string): string {
 }
 
 export interface ProviderSetupTerminalProps {
+  title?: string;
   hostId: string;
   operation: SetupOperation;
   onOperationChange: (next: SetupOperation) => void;
@@ -111,6 +112,7 @@ export interface ProviderSetupTerminalProps {
  * for whether the command completed, failed, or was cancelled.
  */
 export function ProviderSetupTerminal({
+  title,
   hostId,
   operation,
   onOperationChange,
@@ -236,7 +238,7 @@ export function ProviderSetupTerminal({
     setAttachAttempt((attempt) => attempt + 1);
   };
 
-  const bridgeFailed = bridgeState.kind === "error" || bridgeState.kind === "closed";
+  const bridgeFailed = active && (bridgeState.kind === "error" || bridgeState.kind === "closed");
 
   return (
     <section
@@ -251,10 +253,9 @@ export function ProviderSetupTerminal({
             <TerminalIcon className="size-4" aria-hidden="true" />
           </span>
           <div className="min-w-0">
-            <p className="truncate text-sm font-medium capitalize">
-              {operation.action.replaceAll("-", " ")}
+            <p className="truncate text-sm font-medium">
+              {title ?? operation.action.replaceAll("-", " ")}
             </p>
-            <p className="text-xs text-muted-foreground">Live setup terminal</p>
           </div>
         </div>
         <Badge variant="outline" className={`ml-auto gap-1.5 ${details.tone}`}>
@@ -291,7 +292,7 @@ export function ProviderSetupTerminal({
 
       <div className="relative h-72 bg-card p-1 sm:h-80">
         <div ref={setTerminalNode} className="h-full w-full overflow-hidden" />
-        {bridgeState.kind === "connecting" && (
+        {active && bridgeState.kind === "connecting" && (
           <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center bg-background/70 text-sm text-muted-foreground backdrop-blur-[1px]">
             <Loader2Icon className="mr-2 size-4 animate-spin" aria-hidden="true" />
             Connecting terminal…

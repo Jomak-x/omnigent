@@ -37,7 +37,6 @@ from omnigent.onboarding.setup_operations import (
     copilot_host_settings,
     harness_key_removal_settings,
     harness_key_settings,
-    store_setup_credential,
 )
 from omnigent.onboarding.ucode_setup import (
     build_ucode_configure_command,
@@ -463,9 +462,10 @@ def _resolve_key_provider_name(  # type: ignore[explicit-any]  # config is a yam
         unique name derived from *candidate* (keep both), e.g.
         ``"anthropic-2"``.
     """
-    from omnigent.onboarding.setup_operations import resolve_key_provider_name
-
-    return resolve_key_provider_name(config, family, candidate, api_key_ref)
+    same_source = _existing_key_name_for_ref(config, family, api_key_ref)
+    if same_source is not None:
+        return same_source
+    return _unique_provider_name(config, candidate)
 
 
 def _credential_source_hint(entry: ProviderEntry, family: str) -> str | None:
@@ -585,6 +585,7 @@ def _configure_harness_add(family: str | None = None) -> str | None:
         status. Side effect: writes to ``~/.omnigent/config.yaml`` and,
         for a pasted API key, the secret store.
     """
+    from omnigent.onboarding import secrets as secret_store
     from omnigent.onboarding.ambient import detect_providers
     from omnigent.onboarding.configure_models import (
         AddOption,
@@ -745,7 +746,8 @@ def _configure_harness_add(family: str | None = None) -> str | None:
                 config_now, family, candidate, f"keychain:{candidate}"
             )
             pasted = prompt_text(f"{disp} API key", hide_input=True)
-            api_key_ref = store_setup_credential(name, pasted)
+            secret_store.store_secret(name, pasted)
+            api_key_ref = f"keychain:{name}"
 
         # Default model — free-form text entry. The bundled catalog lags new
         # releases (e.g. a brand-new claude-sonnet-4-6 won't be listed yet), so
@@ -832,7 +834,7 @@ def _configure_harness_add(family: str | None = None) -> str | None:
         name = prompt_text("Name for this gateway", default="gateway")
         base_url = prompt_text("Gateway base_url (OpenAI/Anthropic-compatible)")
         pasted = prompt_text("Gateway API key", hide_input=True)
-        api_key_ref = store_setup_credential(name, pasted)
+        secret_store.store_secret(name, pasted)
         # Which harness surfaces — one clear pick instead of two y/n prompts.
         # (These are *harness* surfaces: Codex/OpenAI → codex + openai-agents;
         # Claude/Anthropic → claude-sdk + native-claude.)
@@ -893,7 +895,7 @@ def _configure_harness_add(family: str | None = None) -> str | None:
             ).strip()
         entry = build_gateway_provider_entry(
             base_url=base_url,
-            api_key_ref=api_key_ref,
+            api_key_ref=f"keychain:{name}",
             families=families,
             wire_api=wire_api,
             models=models,
@@ -915,7 +917,8 @@ def _configure_harness_add(family: str | None = None) -> str | None:
             api_key_ref = "env:AWS_BEARER_TOKEN_BEDROCK"
         else:
             pasted = prompt_text("Amazon Bedrock API key (bearer token)", hide_input=True)
-            api_key_ref = store_setup_credential(name, pasted)
+            secret_store.store_secret(name, pasted)
+            api_key_ref = f"keychain:{name}"
         # Bedrock has no catalog default and Claude's own default model is
         # usually not enabled on a Bedrock account, so pin an explicit id.
         default_model = (
@@ -1622,8 +1625,12 @@ def _set_cursor_api_key() -> str | None:
         "That doesn't start with 'crsr_'. Store it anyway?", default=False
     ):
         return None
-    api_key_ref = store_setup_credential(CURSOR_SECRET_NAME, pasted)
-    _save_global_config(harness_key_settings(_load_global_config(), "cursor", api_key_ref))
+    from omnigent.onboarding import secrets as secret_store
+
+    secret_store.store_secret(CURSOR_SECRET_NAME, pasted)
+    _save_global_config(
+        harness_key_settings(_load_global_config(), "cursor", f"keychain:{CURSOR_SECRET_NAME}")
+    )
     return "✓ Cursor API key stored"
 
 
@@ -1909,8 +1916,14 @@ def _set_antigravity_api_key() -> str | None:
         default=False,
     ):
         return None
-    api_key_ref = store_setup_credential(ANTIGRAVITY_SECRET_NAME, pasted)
-    _save_global_config(harness_key_settings(_load_global_config(), "antigravity", api_key_ref))
+    from omnigent.onboarding import secrets as secret_store
+
+    secret_store.store_secret(ANTIGRAVITY_SECRET_NAME, pasted)
+    _save_global_config(
+        harness_key_settings(
+            _load_global_config(), "antigravity", f"keychain:{ANTIGRAVITY_SECRET_NAME}"
+        )
+    )
     return "✓ Gemini API key stored"
 
 
@@ -2871,8 +2884,12 @@ def _set_copilot_github_token() -> str | None:
         default=False,
     ):
         return None
-    api_key_ref = store_setup_credential(COPILOT_SECRET_NAME, pasted)
-    _save_global_config(harness_key_settings(_load_global_config(), "copilot", api_key_ref))
+    from omnigent.onboarding import secrets as secret_store
+
+    secret_store.store_secret(COPILOT_SECRET_NAME, pasted)
+    _save_global_config(
+        harness_key_settings(_load_global_config(), "copilot", f"keychain:{COPILOT_SECRET_NAME}")
+    )
     return "✓ Copilot GitHub token stored"
 
 
