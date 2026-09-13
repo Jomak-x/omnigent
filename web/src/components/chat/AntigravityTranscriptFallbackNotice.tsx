@@ -1,4 +1,12 @@
-export function AntigravityTranscriptFallbackNotice() {
+interface AntigravityTranscriptFallbackNoticeProps {
+  labels?: Readonly<Record<string, string>> | null;
+}
+
+export function AntigravityTranscriptFallbackNotice({
+  labels,
+}: AntigravityTranscriptFallbackNoticeProps) {
+  if (labels?.antigravity_native_transcript_fallback !== "1") return null;
+
   return (
     <div
       role="status"
