@@ -246,6 +246,7 @@ import { useIsCoarsePointer } from "@/hooks/useIsCoarsePointer";
 import { useIsMobileViewport } from "@/hooks/useIsMobileViewport";
 import { ConnectionIndicator } from "./ChatIndicators";
 import { Transcript } from "@/components/chat/Transcript";
+import { AntigravityTranscriptFallbackNotice } from "@/components/chat/AntigravityTranscriptFallbackNotice";
 
 /** Server-info as consumers see it: the probe's result, or "loading". */
 type ServerInfoValue = ServerInfo | "loading";
@@ -1116,6 +1117,11 @@ export function ChatPage() {
       subagentRoutingEligible={subagentRoutingEligible}
       subAgentLabel={subAgentLabel}
       wrapperLabel={capabilitySource.labels[WRAPPER_LABEL_KEY] ?? null}
+      showAntigravityTranscriptFallbackNotice={
+        (activeSession?.labels ?? activeConv?.labels ?? {})[
+          "antigravity_native_transcript_fallback"
+        ] === "1"
+      }
     />
   );
 
@@ -1376,6 +1382,8 @@ interface MainAgentSurfaceProps {
   subAgentLabel: string | null;
   /** The session's ``omnigent.wrapper`` label; see ``ComposerProps``. */
   wrapperLabel: string | null;
+  /** Antigravity fell back to its terminal transcript instead of RPC prompts. */
+  showAntigravityTranscriptFallbackNotice: boolean;
 }
 
 /**
@@ -1508,6 +1516,7 @@ const MainAgentSurface = memo(function MainAgentSurfaceImpl({
   subagentRoutingEligible,
   subAgentLabel,
   wrapperLabel,
+  showAntigravityTranscriptFallbackNotice,
 }: MainAgentSurfaceProps) {
   const terminalFirst = useTerminalFirst();
   // Streaming-hot subscriptions and the bubble pipeline live in <Transcript>.
@@ -1770,6 +1779,11 @@ const MainAgentSurface = memo(function MainAgentSurfaceImpl({
             terminalFirst={terminalFirst}
             spacerMeasureRef={spacerMeasureRef}
           />
+          {showAntigravityTranscriptFallbackNotice && (
+            <AntigravityTranscriptFallbackNotice
+              terminalAvailable={terminalFirst?.terminalsAvailable === true}
+            />
+          )}
           {/* Floating reply button — scoped to the conversation container. */}
           <SelectionPopup
             containerRef={conversationRef}

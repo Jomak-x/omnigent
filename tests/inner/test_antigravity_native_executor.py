@@ -461,6 +461,7 @@ def test_interrupt_session_rpc_failure_returns_false(
     _seed_state(tmp_path)
     monkeypatch.setattr(executor_mod, "resolve_language_server_port", lambda _conv: _PORT)
     monkeypatch.setattr(executor_mod, "cancel_cascade_steps", lambda _port, _cid: False)
+    monkeypatch.setattr(executor_mod, "interrupt_turn_via_tui", lambda _bridge: False)
     result = asyncio.run(_executor(tmp_path).interrupt_session("main"))
     assert result is False
 
@@ -483,6 +484,7 @@ def test_interrupt_session_no_port_returns_false(
 
     monkeypatch.setattr(executor_mod, "resolve_language_server_port", lambda _conv: None)
     monkeypatch.setattr(executor_mod, "cancel_cascade_steps", _cancel)
+    monkeypatch.setattr(executor_mod, "interrupt_turn_via_tui", lambda _bridge: False)
     result = asyncio.run(_executor(tmp_path).interrupt_session("main"))
     assert result is False
     assert called["cancel"] is False
@@ -510,9 +512,27 @@ def test_interrupt_session_placeholder_returns_false(
 
     monkeypatch.setattr(executor_mod, "resolve_language_server_port", _resolve_port)
     monkeypatch.setattr(executor_mod, "cancel_cascade_steps", _cancel)
+    monkeypatch.setattr(executor_mod, "interrupt_turn_via_tui", lambda _bridge: False)
     result = asyncio.run(_executor(tmp_path).interrupt_session("main"))
     assert result is False
     assert called["cancel"] is False
+
+
+@pytest.mark.parametrize("conversation_id", [_CONVERSATION_ID, _PLACEHOLDER_ID])
+def test_interrupt_uses_tui_when_rpc_is_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, conversation_id: str
+) -> None:
+    _seed_state(tmp_path, conversation_id=conversation_id)
+    monkeypatch.setattr(executor_mod, "resolve_language_server_port", lambda _conv: None)
+    calls: list[Path] = []
+
+    def interrupt(bridge_dir: Path) -> bool:
+        calls.append(bridge_dir)
+        return True
+
+    monkeypatch.setattr(executor_mod, "interrupt_turn_via_tui", interrupt)
+    assert asyncio.run(_executor(tmp_path).interrupt_session("main")) is True
+    assert calls == [tmp_path]
 
 
 def test_interrupt_session_missing_state_returns_false(
@@ -534,6 +554,26 @@ def test_interrupt_session_missing_state_returns_false(
     result = asyncio.run(_executor(tmp_path).interrupt_session("main"))
     assert result is False
     assert called["cancel"] is False
+
+
+def test_interrupt_bridge_turn_already_idle_is_idempotent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_state(tmp_path)
+    monkeypatch.setattr(executor_mod, "turn_is_idle_via_tui", lambda _bridge: True)
+    monkeypatch.setattr(executor_mod, "wait_for_turn_idle_via_tui", lambda _bridge: True)
+
+    def unexpected(*_args: object) -> bool:
+        raise AssertionError("idle turn must not send a cancel request")
+
+    monkeypatch.setattr(executor_mod, "resolve_language_server_port", unexpected)
+    monkeypatch.setattr(executor_mod, "interrupt_turn_via_tui", unexpected)
+    assert asyncio.run(
+        executor_mod.interrupt_bridge_turn(tmp_path, expected_session_id="conv_test")
+    )
+    assert not asyncio.run(
+        executor_mod.interrupt_bridge_turn(tmp_path, expected_session_id="other_session")
+    )
 
 
 # ---------------------------------------------------------------------------

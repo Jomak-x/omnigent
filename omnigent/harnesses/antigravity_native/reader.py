@@ -1,54 +1,10 @@
-"""RPC read driver for a native Antigravity (agy) session.
+"""Mirror a native Antigravity session through RPC or its isolated transcript.
 
-This is the read-path driver that replaced the retired transcript-tail forwarder
-(``omnigent.antigravity_native_forwarder``, deleted in the Task 12 cutover).
-Instead of tailing agy's plaintext JSONL transcript, it polls agy's connect-RPC
-``GetCascadeTrajectorySteps`` surface for trajectory steps, maps each new step to
-Omnigent conversation items, POSTs them, emits ``external_session_status`` edges
-on turn transitions, and hands ``WAITING`` steps (questions / permission asks) to
-the Task 8 interaction bridge through an injected callback.
-
-How it differs from the transcript forwarder it supersedes:
-
-* **Read transport is the RPC, not the file.** Steps come from
-  :func:`omnigent.harnesses.antigravity_native.rpc.get_trajectory_steps` rather than a byte
-  tail. The RPC returns the *full* trajectory step list on every call (a
-  snapshot), so the driver de-dups *within the run* by ``(trajectory_id,
-  step_index)`` identity and posts only steps it has not yet seen.
-
-* **No durable cursor.** The transcript forwarder persisted a ``forwarded_steps``
-  resume cursor to bridge state so a restart did not re-mirror the whole file.
-  This driver keeps an *in-memory* seen-set only; the durable cursor (and its
-  JSONL) is retired in the Task 12 cutover. A restart re-reads from the start —
-  acceptable because the reader is recreated per session by the Task 11 runner,
-  not crash-restarted mid-conversation, and the mapper's USER_INPUT-skip plus the
-  server's own item handling bound the blast radius.
-
-* **The mapper carries the item logic.** :func:`map_step_to_events` is the pure,
-  no-delta, skip-USER_INPUT mapping layer (Task 4). It deliberately does NOT emit
-  status edges — that was always the stateful parser's job. This driver is now
-  that stateful layer: it replicates the transcript parser's RUNNING/IDLE
-  transition emission (a turn opens on a USER_INPUT step and closes on an
-  assistant-text PLANNER_RESPONSE that issues no tool calls), deduped so an edge
-  fires only on a real transition.
-
-Discovery mirrors the forwarder's discipline — *poll until ready, never guess*:
-
-1. **Cascade id.** agy mints its own conversation UUID (it ignores the launcher's
-   ``ANTIGRAVITY_CONVERSATION_ID``) and the launcher seeds bridge state with an
-   ``agy_conv_*`` placeholder until the real id is discovered and persisted. The
-   reader polls :func:`read_bridge_state` until ``conversation_id`` is present and
-   is NOT a placeholder; that real id is the cascade id (agy uses one UUID for
-   both the conversation and the cascade).
-2. **RPC port.** The reader enumerates candidate agy connect-RPC ports
-   (:func:`_candidate_agy_rpc_ports`) and binds the one that confirms it hosts the
-   cascade id (:func:`_conversation_matches`). It keeps polling until a port
-   confirms ownership — a recycled/foreign port is rejected, never written to.
-
-Everything that touches the network (the RPC client) or the clock (sleeps) is
-funnelled through module-level seams so the unit tests drive the loop with a
-scripted step source and a captured post sink, no real agy and no real sockets.
-The loop is finite under test via an injectable ``stop`` predicate.
+The reader prefers agy's connect-RPC trajectory stream, which supports full
+tool and interaction events. When the local RPC is unavailable, it tails the
+transcript inside this bridge's isolated Gemini directory. That fallback mirrors
+committed assistant text and uses agy's Stop hook for turn completion; tool
+approvals remain in the native terminal.
 """
 
 from __future__ import annotations
@@ -56,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -88,19 +45,31 @@ from omnigent.harnesses.antigravity_native.steps import (
     OutboundEvent,
     PendingInteraction,
     _execution_discriminator,
+    _message_event,
     _step_index,
     _tool_call_id,
     _trajectory_id,
+    _user_message_event,
     map_step_to_events,
     output_reasoning_delta_event,
     output_text_delta_event,
     pending_interaction,
+)
+from omnigent.harnesses.antigravity_native.stop_hook import STOP_EVENTS_FILE
+from omnigent.harnesses.antigravity_native.transcript import (
+    JsonlTail,
+    TranscriptBinding,
+    extract_user_request,
+    initial_tail_state,
+    resolve_owned_transcript,
+    transcript_changed_since_launch,
 )
 from omnigent.harnesses.claude_native.bridge import url_component
 from omnigent.native._native_post_delivery import post_session_event_with_retry
 from omnigent.server.schemas import ElicitationRequestParams, ElicitationResult
 
 _logger = logging.getLogger(__name__)
+_TRANSCRIPT_FALLBACK_LABEL_KEY = "antigravity_native_transcript_fallback"
 
 # Default seconds between RPC polls. The RPC returns a full snapshot each call
 # and steps finalize only at DONE (no token streaming), so a sub-second cadence
@@ -721,24 +690,63 @@ def _status_event(status: str) -> OutboundEvent:
     )
 
 
+def _transcript_stop_status(failed: bool, *, boundary_missing: bool = False) -> OutboundEvent:
+    event = _status_event(_STATUS_FAILED if failed or boundary_missing else _STATUS_IDLE)
+    if failed or boundary_missing:
+        return OutboundEvent(
+            event_type=event.event_type,
+            data={
+                **event.data,
+                "output": (
+                    "Antigravity transcript completion could not be verified. "
+                    "Check its native terminal for details."
+                    if boundary_missing
+                    else (
+                        "Antigravity reported a failed turn. "
+                        "Check its native terminal for details."
+                    )
+                ),
+            },
+            step_index=event.step_index,
+        )
+    return event
+
+
+@dataclass(frozen=True)
+class _TranscriptStop:
+    failed: bool
+    boundary: tuple[int, int, int] | None
+
+
+def _stop_from_hook_event(event: dict[str, object]) -> _TranscriptStop:
+    raw = event.get("transcript_boundary")
+    boundary = (
+        tuple(raw)
+        if isinstance(raw, list)
+        and len(raw) == 3
+        and all(isinstance(part, int) and not isinstance(part, bool) and part >= 0 for part in raw)
+        else None
+    )
+    return _TranscriptStop(failed=event.get("failed") is True, boundary=boundary)
+
+
 async def _post_event(
     client: httpx.AsyncClient,
     session_id: str,
     event: OutboundEvent,
-) -> None:
+) -> bool:
     """
     POST one mapped event with the shared bounded-retry delivery loop.
 
     :param client: HTTP client for Omnigent event posts.
     :param session_id: Omnigent conversation id, e.g. ``"conv_abc123"``.
     :param event: The mapped event to deliver.
-    :returns: None. Delivery failures are logged inside the retry loop; an
-        ambiguous conversation-item failure is intentionally not retried (a
-        re-post would duplicate the item).
+    :returns: Whether the server accepted the event. Delivery failures are
+        logged inside the retry loop.
     """
     url = f"/v1/sessions/{url_component(session_id)}/events"
     payload: dict[str, object] = {"type": event.event_type, "data": event.data}
-    await post_session_event_with_retry(
+    response = await post_session_event_with_retry(
         client=client,
         url=url,
         payload=payload,
@@ -749,6 +757,7 @@ async def _post_event(
         retry_delay=lambda attempt: _POST_RETRY_DELAY_SECONDS * attempt,
         logger_name=__name__,
     )
+    return response is not None and response.status_code < 400
 
 
 def _resolve_cascade_id(bridge_dir: Path) -> str | None:
@@ -798,7 +807,8 @@ async def _discover(
     *,
     poll_interval_s: float,
     stop: StopPredicate,
-) -> tuple[str, int] | None:
+    skip_cascade_ids: frozenset[str] = frozenset(),
+) -> tuple[str, int] | TranscriptBinding | None:
     """
     Resolve ``(cascade_id, port)``, polling until ready or asked to stop.
 
@@ -821,7 +831,7 @@ async def _discover(
     """
     while True:
         cascade_id = await asyncio.to_thread(_resolve_cascade_id, bridge_dir)
-        if cascade_id is not None:
+        if cascade_id is not None and cascade_id not in skip_cascade_ids:
             port = await asyncio.to_thread(_resolve_rpc_port, cascade_id)
             if port is not None:
                 _logger.info(
@@ -831,9 +841,218 @@ async def _discover(
                     port,
                 )
                 return cascade_id, port
+        transcript = await asyncio.to_thread(resolve_owned_transcript, bridge_dir)
+        if (
+            transcript is not None
+            and transcript.conversation_id not in skip_cascade_ids
+            and transcript_changed_since_launch(bridge_dir, transcript)
+        ):
+            # Prefer the original RPC reader whenever this conversation's own
+            # port is available. agy 1.2.2 returns 401 to unauthenticated RPCs;
+            # its session-scoped transcript remains available to the TUI.
+            port = await asyncio.to_thread(_resolve_rpc_port, transcript.conversation_id)
+            if port is not None:
+                return transcript.conversation_id, port
+            _logger.info(
+                "agy RPC unavailable; mirroring isolated transcript: cascade=%s",
+                transcript.conversation_id,
+            )
+            return transcript
         if stop():
             return None
         await _sleep(poll_interval_s)
+
+
+async def _supervise_transcript(
+    bridge_dir: Path,
+    binding: TranscriptBinding,
+    session_id: str,
+    *,
+    client: httpx.AsyncClient,
+    poll_interval_s: float,
+    stop: StopPredicate,
+    committed_steps_out: list[int] | None,
+    skip_cascade_ids: frozenset[str] = frozenset(),
+) -> str | None:
+    """Mirror committed TUI steps through native or confirmed-cancel Stop boundaries."""
+    baseline_offset, baseline_identity = initial_tail_state(bridge_dir, binding.conversation_id)
+    step_tail = JsonlTail(
+        binding.path,
+        offset=baseline_offset,
+        identity=baseline_identity,
+        safe_root=bridge_dir,
+        include_offsets=True,
+    )
+    stop_tail = JsonlTail(bridge_dir / STOP_EVENTS_FILE, safe_root=bridge_dir)
+    seen: set[tuple[int, str, str]] = set()
+    turn_active = False
+    pending_records: deque[dict[str, object]] = deque()
+    pending_stops: deque[_TranscriptStop] = deque()
+    seen_stop_boundaries: set[tuple[int, int, int]] = set()
+    committed_turns = 1 if baseline_offset > 0 else 0
+    while not stop():
+        current = await asyncio.to_thread(resolve_owned_transcript, bridge_dir)
+        if current is None:
+            await _sleep(poll_interval_s)
+            continue
+        for event in await asyncio.to_thread(stop_tail.read):
+            if (
+                event.get("conversation_id") == binding.conversation_id
+                and event.get("fully_idle") is True
+            ):
+                marker = _stop_from_hook_event(event)
+                if marker.boundary is not None:
+                    if marker.boundary in seen_stop_boundaries:
+                        continue
+                    seen_stop_boundaries.add(marker.boundary)
+                pending_stops.append(marker)
+        pending_records.extend(await asyncio.to_thread(step_tail.read))
+        delivery_blocked = False
+        while pending_records:
+            record = pending_records[0]
+            step_index = record.get("step_index")
+            step_type = record.get("type")
+            created_at = record.get("created_at")
+            if (
+                not isinstance(step_index, int)
+                or not isinstance(step_type, str)
+                or not isinstance(created_at, str)
+            ):
+                pending_records.popleft()
+                continue
+            key = (step_index, step_type, created_at)
+            record_end = record.get("_transcript_end_offset")
+            if key in seen:
+                pending_records.popleft()
+                continue
+            if (
+                record.get("source") == "USER_EXPLICIT"
+                and step_type == "USER_INPUT"
+                and turn_active
+                and not pending_stops
+            ):
+                # The transcript can outrun the Stop hook. Keep the next turn
+                # queued until the previous turn's completion marker arrives.
+                break
+            if (
+                record.get("source") == "USER_EXPLICIT"
+                and record.get("type") == "USER_INPUT"
+                and record.get("status") == "DONE"
+            ):
+                if turn_active and pending_stops:
+                    marker = pending_stops[0]
+                    within_turn = (
+                        marker.boundary is not None
+                        and step_tail.identity == marker.boundary[:2]
+                        and isinstance(record_end, int)
+                        and record_end <= marker.boundary[2]
+                    )
+                    if not within_turn:
+                        if not await _post_event(
+                            client,
+                            session_id,
+                            _transcript_stop_status(
+                                marker.failed,
+                                boundary_missing=(
+                                    marker.boundary is None
+                                    or step_tail.identity != marker.boundary[:2]
+                                ),
+                            ),
+                        ):
+                            delivery_blocked = True
+                            break
+                        pending_stops.popleft()
+                        turn_active = False
+                user_text = extract_user_request(record.get("content"))
+                if user_text is not None:
+                    mapped = _user_message_event(text=user_text)
+                    delivered = await _post_event(
+                        client,
+                        session_id,
+                        OutboundEvent(
+                            event_type=mapped.event_type,
+                            data={
+                                **mapped.data,
+                                "source_id": (
+                                    f"agy-transcript:{binding.conversation_id}:"
+                                    f"user:{step_index}:{created_at}"
+                                ),
+                            },
+                            step_index=step_index,
+                        ),
+                    )
+                    if not delivered:
+                        delivery_blocked = True
+                        break
+                if not turn_active:
+                    if not await _post_event(client, session_id, _status_event(_STATUS_RUNNING)):
+                        delivery_blocked = True
+                        break
+                    turn_active = True
+                    committed_turns += 1
+            elif (
+                record.get("source") == "MODEL"
+                and record.get("type") == "PLANNER_RESPONSE"
+                and record.get("status") == "DONE"
+            ):
+                content = record.get("content")
+                if isinstance(content, str) and content.strip():
+                    mapped = _message_event(
+                        conversation_id=binding.conversation_id,
+                        step_idx=step_index,
+                        text=content,
+                    )
+                    delivered = await _post_event(
+                        client,
+                        session_id,
+                        OutboundEvent(
+                            event_type=mapped.event_type,
+                            data={
+                                **mapped.data,
+                                "source_id": (
+                                    f"agy-transcript:{binding.conversation_id}:"
+                                    f"planner:{step_index}:{created_at}"
+                                ),
+                            },
+                            step_index=mapped.step_index,
+                        ),
+                    )
+                    if not delivered:
+                        delivery_blocked = True
+                        break
+            pending_records.popleft()
+            if record.get("status") == "DONE":
+                seen.add(key)
+        if pending_stops and turn_active and not delivery_blocked:
+            marker = pending_stops[0]
+            boundary_ready = (
+                marker.boundary is None
+                or step_tail.identity != marker.boundary[:2]
+                or step_tail.offset >= marker.boundary[2]
+            )
+            if boundary_ready:
+                if await _post_event(
+                    client,
+                    session_id,
+                    _transcript_stop_status(
+                        marker.failed,
+                        boundary_missing=(
+                            marker.boundary is None or step_tail.identity != marker.boundary[:2]
+                        ),
+                    ),
+                ):
+                    pending_stops.popleft()
+                    turn_active = False
+        if (
+            current.conversation_id != binding.conversation_id
+            and current.conversation_id not in skip_cascade_ids
+            and not turn_active
+        ):
+            if committed_steps_out is not None:
+                committed_steps_out.append(committed_turns)
+            return current.conversation_id
+        await _sleep(poll_interval_s)
+    return None
 
 
 async def _watch_for_rotation(
@@ -952,21 +1171,22 @@ async def supervise_reader(
     committed_steps_out: list[int] | None = None,
 ) -> str | None:
     """
-    Poll agy's RPC for trajectory steps and mirror them into the Omnigent session.
+    Mirror agy's trajectory through RPC or its isolated transcript.
 
-    The read-path driver: it discovers the cascade id + connect-RPC port (polling
-    until ready), then on each poll reads the full trajectory step snapshot, and
-    for every step it has not seen before this run:
+    When RPC confirms the cascade and port, it reads trajectory step snapshots
+    and for every step it has not seen before this run:
 
     * maps the step to conversation-item events (:func:`map_step_to_events`) and
-      POSTs each one (USER_INPUT maps to ``[]`` so it posts nothing — the user
-      turn is already persisted by the direct ``POST /events`` hook);
+      POSTs each one, including committed USER_INPUT messages;
     * emits an ``external_session_status`` RUNNING edge when a user turn opens and
       an IDLE edge when an assistant-text step closes it, each only on a real
       transition (deduped via an in-memory turn-active flag);
     * when the step is ``WAITING`` for user interaction, invokes
       ``on_pending_interaction`` exactly once for that interaction (the Task 8
       bridge drives the elicitation + answer).
+
+    If RPC cannot authenticate, the bridge-owned transcript supplies committed
+    user and assistant messages, while agy's Stop hook closes each turn.
 
     De-dup is by ``(trajectory_id, step_index)`` identity in an in-memory
     seen-set (no durable cursor — retired in Task 12), so re-reading the same
@@ -1020,10 +1240,34 @@ async def supervise_reader(
     """
     should_stop: StopPredicate = stop if stop is not None else (lambda: False)
 
-    discovered = await _discover(bridge_dir, poll_interval_s=poll_interval_s, stop=should_stop)
+    discovered = await _discover(
+        bridge_dir,
+        poll_interval_s=poll_interval_s,
+        stop=should_stop,
+        skip_cascade_ids=skip_cascade_ids,
+    )
     if discovered is None:
         return None
+    if isinstance(discovered, TranscriptBinding):
+        if _resolve_cascade_id(bridge_dir) != discovered.conversation_id:
+            _adopt_cascade_in_place(bridge_dir, session_id, discovered.conversation_id)
+            await _record_external_session_id(client, session_id, discovered.conversation_id)
+        await _record_read_mode(client, session_id, transcript_fallback=True)
+        return await _supervise_transcript(
+            bridge_dir,
+            discovered,
+            session_id,
+            client=client,
+            poll_interval_s=poll_interval_s,
+            stop=should_stop,
+            committed_steps_out=committed_steps_out,
+            skip_cascade_ids=skip_cascade_ids,
+        )
     cascade_id, port = discovered
+    if _resolve_cascade_id(bridge_dir) != cascade_id:
+        _adopt_cascade_in_place(bridge_dir, session_id, cascade_id)
+        await _record_external_session_id(client, session_id, cascade_id)
+    await _record_read_mode(client, session_id, transcript_fallback=False)
 
     # One set of cross-poll/cross-frame trackers per reader run, shared by BOTH
     # the stream path and the poll fallback so a fall-through after a partial
@@ -3048,6 +3292,25 @@ async def _record_external_session_id(
             session_id,
             cascade_id,
         )
+
+
+async def _record_read_mode(
+    client: httpx.AsyncClient, session_id: str, *, transcript_fallback: bool
+) -> None:
+    """Expose when approvals must be handled in the native terminal."""
+    try:
+        response = await client.patch(
+            f"/v1/sessions/{url_component(session_id)}",
+            json={"labels": {_TRANSCRIPT_FALLBACK_LABEL_KEY: "1" if transcript_fallback else "0"}},
+        )
+        if response.status_code >= 400:
+            _logger.warning(
+                "agy reader: read-mode PATCH returned %s for session=%s",
+                response.status_code,
+                session_id,
+            )
+    except (httpx.HTTPError, AttributeError, TypeError):
+        _logger.warning("agy reader: failed to record read mode for session=%s", session_id)
 
 
 async def _rotate_session_for_cascade(

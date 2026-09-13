@@ -631,15 +631,21 @@ def test_read_tmux_info_missing_returns_none(tmp_path: Path) -> None:
     assert read_tmux_info(tmp_path / "bridge") is None
 
 
-def test_read_tmux_info_rejects_malformed_json(tmp_path: Path) -> None:
+def test_read_tmux_info_rejects_malformed_json(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A corrupt ``tmux.json`` is treated as absent rather than raising."""
+    monkeypatch.setattr(_mod, "_BRIDGE_ROOT", tmp_path / "antigravity-native")
     bridge_dir = prepare_bridge_dir("bridge_malformed")
     (bridge_dir / "tmux.json").write_text("{not json", encoding="utf-8")
     assert read_tmux_info(bridge_dir) is None
 
 
-def test_read_tmux_info_rejects_missing_fields(tmp_path: Path) -> None:
+def test_read_tmux_info_rejects_missing_fields(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A ``tmux.json`` lacking a non-empty target/socket is rejected."""
+    monkeypatch.setattr(_mod, "_BRIDGE_ROOT", tmp_path / "antigravity-native")
     bridge_dir = prepare_bridge_dir("bridge_partial")
     (bridge_dir / "tmux.json").write_text(json.dumps({"socket_path": "/s"}), encoding="utf-8")
     assert read_tmux_info(bridge_dir) is None
@@ -649,7 +655,9 @@ def test_read_tmux_info_rejects_missing_fields(tmp_path: Path) -> None:
     assert read_tmux_info(bridge_dir) is None
 
 
-def test_clear_bridge_state_removes_tmux_json(tmp_path: Path) -> None:
+def test_clear_bridge_state_removes_tmux_json(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """
     Clearing runtime state also drops the advertised tmux pane.
 
@@ -657,6 +665,7 @@ def test_clear_bridge_state_removes_tmux_json(tmp_path: Path) -> None:
     surviving ``tmux.json`` would let the executor bootstrap the first turn
     against the prior run's pane.
     """
+    monkeypatch.setattr(_mod, "_BRIDGE_ROOT", tmp_path / "antigravity-native")
     bridge_dir = prepare_bridge_dir("bridge_clear")
     write_bridge_state(
         bridge_dir,

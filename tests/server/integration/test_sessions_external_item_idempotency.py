@@ -8,11 +8,15 @@ parallel. ``data.source_id`` makes the persist idempotent.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
 
+from omnigent.harnesses.antigravity_native import reader, transcript
+from omnigent.harnesses.antigravity_native.stop_hook import record_stop_event
 from omnigent.runtime import pending_inputs
 from tests.server.helpers import create_test_agent
 
@@ -71,6 +75,92 @@ async def test_reposted_item_with_source_id_persists_once(
     second = await _post_item(client, session_id, text="hello once", source_id="rec-1:0:message")
     assert first["item_id"] == second["item_id"]
     assert await _message_texts(client, session_id) == ["hello once"]
+
+
+async def test_transcript_reader_restart_dedupes_items_and_preserves_next_pending_input(
+    client: httpx.AsyncClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session_id = await _create_session(client, "agy-transcript-restart")
+    bridge_dir = tmp_path / "bridge"
+    conversation_id = "8bb3c819-e505-4812-b0f6-895bd2ec1f98"
+    app_dir = bridge_dir / "agy-home" / ".gemini" / "antigravity-cli"
+    transcript_path = (
+        app_dir
+        / "brain"
+        / conversation_id
+        / ".system_generated"
+        / "logs"
+        / "transcript_full.jsonl"
+    )
+    transcript_path.parent.mkdir(parents=True)
+    cache = app_dir / "cache" / "last_conversations.json"
+    cache.parent.mkdir(parents=True)
+    cache.write_text(json.dumps({"/scratch": conversation_id}))
+
+    def step(index: int, source: str, kind: str, content: str) -> str:
+        return (
+            json.dumps(
+                {
+                    "step_index": index,
+                    "source": source,
+                    "type": kind,
+                    "status": "DONE",
+                    "created_at": f"2026-09-13T02:00:{index:02d}Z",
+                    "content": content,
+                }
+            )
+            + "\n"
+        )
+
+    transcript_path.write_text(
+        step(0, "USER_EXPLICIT", "USER_INPUT", "<USER_REQUEST>first</USER_REQUEST>")
+        + step(1, "MODEL", "PLANNER_RESPONSE", "first answer")
+    )
+    record_stop_event(bridge_dir, {"conversationId": conversation_id, "fullyIdle": True})
+    ticks = 0
+
+    async def sleep(_duration: float) -> None:
+        nonlocal ticks
+        ticks += 1
+
+    monkeypatch.setattr(reader, "_sleep", sleep)
+
+    async def mirror() -> None:
+        nonlocal ticks
+        ticks = 0
+        await reader._supervise_transcript(
+            bridge_dir,
+            transcript.TranscriptBinding(conversation_id, transcript_path),
+            session_id,
+            client=client,
+            poll_interval_s=0,
+            stop=lambda: ticks >= 4,
+            committed_steps_out=None,
+        )
+
+    await mirror()
+    assert await _message_texts(client, session_id) == ["first", "first answer"]
+    pending_id = pending_inputs.record(
+        session_id,
+        [{"type": "input_text", "text": "second"}],
+        created_by="alice@example.com",
+    )
+    with transcript_path.open("a") as handle:
+        handle.write(
+            step(2, "USER_EXPLICIT", "USER_INPUT", "<USER_REQUEST>second</USER_REQUEST>")
+            + step(3, "MODEL", "PLANNER_RESPONSE", "second answer")
+        )
+    record_stop_event(bridge_dir, {"conversationId": conversation_id, "fullyIdle": True})
+    await mirror()
+    assert await _message_texts(client, session_id) == [
+        "first",
+        "first answer",
+        "second",
+        "second answer",
+    ]
+    assert all(
+        entry["pending_id"] != pending_id for entry in pending_inputs.snapshot_for(session_id)
+    )
 
 
 async def test_distinct_source_ids_persist_separately(
@@ -136,7 +226,7 @@ async def test_bad_source_id_is_rejected(client: httpx.AsyncClient) -> None:
     assert resp.status_code == 400
 
 
-def test_client_cannot_smuggle_a_stable_id() -> None:
+async def test_client_cannot_smuggle_a_stable_id() -> None:
     """``stable_id`` is internal-only: a client key inside event data is
     dropped by the item builder, never bound onto the entity."""
     from omnigent.server.routes._sessions.helpers import _build_new_item

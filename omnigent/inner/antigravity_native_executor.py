@@ -66,13 +66,18 @@ from omnigent.harnesses.antigravity_native.bridge import (
     ANTIGRAVITY_NATIVE_BRIDGE_DIR_ENV_VAR,
     ANTIGRAVITY_NATIVE_REQUEST_SESSION_ID_ENV_VAR,
     inject_user_message_via_tui,
+    interrupt_turn_via_tui,
     is_placeholder_conversation_id,
     read_bridge_state,
+    turn_is_idle_via_tui,
+    wait_for_turn_idle_via_tui,
 )
 from omnigent.harnesses.antigravity_native.rpc import (
     cancel_cascade_steps,
     resolve_language_server_port,
 )
+from omnigent.harnesses.antigravity_native.stop_hook import record_stop_event
+from omnigent.harnesses.antigravity_native.transcript import resolve_owned_transcript
 from omnigent.inner.executor import (
     EnqueuedContent,
     Executor,
@@ -145,12 +150,11 @@ class AntigravityNativeExecutor(Executor):
 
     async def interrupt_session(self, session_key: str) -> bool:
         """
-        Interrupt the active native Antigravity turn via ``CancelCascadeSteps``.
+        Interrupt the active native Antigravity turn through RPC or the TUI.
 
-        Resolves the cascade id from bridge state (the cascade id IS the
-        conversation id), discovers agy's connect-RPC port, and asks agy to
-        cancel the running cascade
-        (:func:`omnigent.harnesses.antigravity_native.rpc.cancel_cascade_steps`).
+        Prefer ``CancelCascadeSteps`` for a validated RPC conversation. If the
+        port is unavailable or rejects cancellation, send the TUI's visible
+        Escape cancel key to the runner-owned active pane instead.
 
         .. note:: **Scope — RUNNING cascades only (live-verified, C3).**
            ``CancelCascadeSteps`` stops an in-flight (generating) cascade — the
@@ -164,34 +168,13 @@ class AntigravityNativeExecutor(Executor):
 
         :param session_key: Adapter session key. Unused; the native bridge is
             per conversation.
-        :returns: ``True`` when agy accepted the cancel; ``False`` when there is
-            no real conversation yet (placeholder / missing or inactive bridge
-            state), no agy connect-RPC port could be resolved, or the cancel RPC
-            failed.
+        :returns: ``True`` when either cancel transport accepted the request;
+            ``False`` when the bridge is inactive or neither transport is ready.
         """
         del session_key
-        state = await asyncio.to_thread(read_bridge_state, self._bridge_dir)
-        if state is None or not _session_is_active(state.session_id, self._request_session_id):
-            return False
-        cascade_id = state.conversation_id
-        # No live cascade exists before agy mints its real id, so never RPC the
-        # ``agy_conv_*`` placeholder.
-        if is_placeholder_conversation_id(cascade_id):
-            return False
-        port = await asyncio.to_thread(resolve_language_server_port, cascade_id)
-        if port is None:
-            _logger.warning(
-                "antigravity native interrupt: no connect-RPC port for conversation=%s",
-                cascade_id,
-            )
-            return False
-        cancelled = await asyncio.to_thread(cancel_cascade_steps, port, cascade_id)
-        _logger.info(
-            "antigravity native interrupt via CancelCascadeSteps: conversation=%s accepted=%s",
-            cascade_id,
-            cancelled,
+        return await interrupt_bridge_turn(
+            self._bridge_dir, expected_session_id=self._request_session_id
         )
-        return cancelled
 
     async def run_turn(
         self,
@@ -302,6 +285,61 @@ class AntigravityNativeExecutor(Executor):
                 state.session_id,
             )
             return None
+
+
+async def interrupt_bridge_turn(
+    bridge_dir: Path, *, expected_session_id: str | None = None
+) -> bool:
+    """Cancel one active bridge turn using its validated RPC or visible TUI pane."""
+    state = await asyncio.to_thread(read_bridge_state, bridge_dir)
+    if state is None or not _session_is_active(state.session_id, expected_session_id):
+        return False
+    if await asyncio.to_thread(turn_is_idle_via_tui, bridge_dir):
+        await _record_confirmed_interruption(bridge_dir)
+        return True
+    cascade_id = state.conversation_id
+    if not is_placeholder_conversation_id(cascade_id):
+        port = await asyncio.to_thread(resolve_language_server_port, cascade_id)
+        if port is not None:
+            cancelled = await asyncio.to_thread(cancel_cascade_steps, port, cascade_id)
+            if cancelled:
+                _logger.info(
+                    "antigravity native interrupt via CancelCascadeSteps: conversation=%s",
+                    cascade_id,
+                )
+                await _record_confirmed_interruption(bridge_dir)
+                return True
+    try:
+        cancelled = await asyncio.to_thread(interrupt_turn_via_tui, bridge_dir)
+    except RuntimeError as exc:
+        _logger.warning("antigravity native TUI interrupt failed: %s", exc)
+        return False
+    if cancelled:
+        _logger.info("antigravity native interrupt via TUI Escape: session=%s", state.session_id)
+        await _record_confirmed_interruption(bridge_dir)
+    return cancelled
+
+
+async def _record_confirmed_interruption(bridge_dir: Path) -> None:
+    """Close a canceled transcript turn after agy's TUI confirms it is idle."""
+    try:
+        idle = await asyncio.to_thread(wait_for_turn_idle_via_tui, bridge_dir)
+        if not idle:
+            return
+        binding = await asyncio.to_thread(resolve_owned_transcript, bridge_dir)
+        if binding is None:
+            return
+        await asyncio.to_thread(
+            record_stop_event,
+            bridge_dir,
+            {
+                "conversationId": binding.conversation_id,
+                "fullyIdle": True,
+                "terminationReason": "USER_CANCELED",
+            },
+        )
+    except (OSError, RuntimeError) as exc:
+        _logger.warning("antigravity native interrupt completion not recorded: %s", exc)
 
 
 def _bridge_dir_from_env() -> Path:

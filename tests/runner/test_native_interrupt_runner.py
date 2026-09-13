@@ -5,7 +5,7 @@ HTTP-path tests in ``test_app_sessions_native_events_lifecycle.py`` /
 ``test_app_sessions_native_supervision.py`` (which POST to ``/events`` and patch
 the bridge-module control functions). The focus here is the registry dispatch
 and the descriptor-collapsed uniform handlers: which harnesses route where, the
-no-handler fall-through contract (antigravity/opencode), and the 503 mapping.
+no-handler fall-through contract (opencode), and the 503 mapping.
 """
 
 from __future__ import annotations
@@ -99,12 +99,109 @@ def test_native_cancel_capability_follows_stop_registry() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("harness", ["antigravity-native", "opencode-native", "claude-sdk", None])
+@pytest.mark.parametrize("harness", ["opencode-native", "claude-sdk", None])
 async def test_no_handler_harnesses_return_none(harness: str | None) -> None:
     """Harnesses without an interrupt/stop handler return None (caller falls through)."""
     runner, _ = _make_runner()
     assert await runner.interrupt(harness, "conv_x") is None
     assert await runner.stop(harness, "conv_x") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("event_type", ["interrupt", "stop"])
+@pytest.mark.parametrize("bridge_id", ["active_bridge", None])
+async def test_antigravity_interrupt_uses_active_bridge_label_and_wakes_parent(
+    monkeypatch: pytest.MonkeyPatch, event_type: str, bridge_id: str | None
+) -> None:
+    """Both native cancel events reach the bridge shared with the executor."""
+    import omnigent.harnesses.antigravity_native.bridge as bridge
+    import omnigent.inner.antigravity_native_executor as executor
+    from omnigent.runner.native import interrupt as interrupt_mod
+
+    async def _labels(*, server_client: Any, session_id: str) -> dict[str, str]:
+        assert session_id == "conv_agy"
+        return (
+            {bridge.ANTIGRAVITY_NATIVE_BRIDGE_ID_LABEL_KEY: bridge_id}
+            if bridge_id is not None
+            else {}
+        )
+
+    calls: list[tuple[Any, str | None]] = []
+
+    async def _cancel(bridge_dir: Any, *, expected_session_id: str | None) -> bool:
+        calls.append((bridge_dir, expected_session_id))
+        return True
+
+    monkeypatch.setattr(interrupt_mod, "_session_labels_for_runner_spawn", _labels)
+    monkeypatch.setattr(bridge, "bridge_dir_for_bridge_id", lambda bridge_id: f"dir/{bridge_id}")
+    monkeypatch.setattr(executor, "interrupt_bridge_turn", _cancel)
+    runner, captured = _make_runner()
+
+    resp = await getattr(runner, event_type)("antigravity-native", "conv_agy")
+
+    assert resp is not None and resp.status_code == 204
+    assert calls == [(f"dir/{bridge_id or 'conv_agy'}", "conv_agy")]
+    assert captured["wakes"] == [("conv_agy", "cancelled", "[System: sub-agent interrupted]")]
+
+
+@pytest.mark.asyncio
+async def test_antigravity_interrupt_failure_does_not_acknowledge_active_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unavailable native cancel does not report success for a live bridge."""
+    import json
+
+    import omnigent.harnesses.antigravity_native.bridge as bridge
+    import omnigent.inner.antigravity_native_executor as executor
+    from omnigent.runner.native import interrupt as interrupt_mod
+
+    async def _cancel(bridge_dir: Any, *, expected_session_id: str | None) -> bool:
+        return False
+
+    monkeypatch.setattr(bridge, "bridge_dir_for_bridge_id", lambda bridge_id: bridge_id)
+
+    async def _labels(*, server_client: Any, session_id: str) -> dict[str, str]:
+        return {}
+
+    monkeypatch.setattr(interrupt_mod, "_session_labels_for_runner_spawn", _labels)
+    monkeypatch.setattr(
+        bridge, "read_bridge_state", lambda bridge_dir: SimpleNamespace(session_id="conv_agy")
+    )
+    monkeypatch.setattr(executor, "interrupt_bridge_turn", _cancel)
+    runner, captured = _make_runner()
+
+    resp = await runner.interrupt("antigravity-native", "conv_agy")
+
+    assert resp is not None and resp.status_code == 503
+    assert json.loads(bytes(resp.body))["error"] == "antigravity_native_interrupt_failed"
+    assert captured["wakes"] == []
+
+
+@pytest.mark.asyncio
+async def test_antigravity_interrupt_absent_bridge_is_idempotent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A vanished bridge has no native turn to cancel or sub-agent to wake."""
+    import omnigent.harnesses.antigravity_native.bridge as bridge
+    import omnigent.inner.antigravity_native_executor as executor
+    from omnigent.runner.native import interrupt as interrupt_mod
+
+    async def _labels(*, server_client: Any, session_id: str) -> dict[str, str]:
+        return {}
+
+    async def _cancel(bridge_dir: Any, *, expected_session_id: str | None) -> bool:
+        return False
+
+    monkeypatch.setattr(interrupt_mod, "_session_labels_for_runner_spawn", _labels)
+    monkeypatch.setattr(bridge, "bridge_dir_for_bridge_id", lambda bridge_id: bridge_id)
+    monkeypatch.setattr(bridge, "read_bridge_state", lambda bridge_dir: None)
+    monkeypatch.setattr(executor, "interrupt_bridge_turn", _cancel)
+    runner, captured = _make_runner()
+
+    resp = await runner.stop("antigravity-native", "conv_agy")
+
+    assert resp is not None and resp.status_code == 204
+    assert captured["wakes"] == []
 
 
 @pytest.mark.asyncio

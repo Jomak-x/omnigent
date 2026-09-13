@@ -11,7 +11,8 @@ antigravity` ensures a host daemon, the daemon-spawned **runner** launches `agy`
 in a runner-owned **tmux** terminal, and your TTY attaches to it. This is **not**
 the in-process `antigravity` Gemini-SDK harness — that one runs `google-antigravity`
 with a Gemini *API key*; this one drives the OAuth-only `agy` CLI and mirrors it
-over **connect-RPC**. This skill is the proven recipe for running it **for real
+over **connect-RPC**, with a session-scoped transcript fallback when that local
+RPC is unavailable. This skill is the proven recipe for running it **for real
 against a live local server + runner** — not just the unit tests.
 
 > Like the other native harnesses, the runner imports from your **current
@@ -43,11 +44,50 @@ Three transports, easy to confuse:
    (#1156/#1158). It is **not** delivered over `SendUserCascadeMessage` (that
    headless RPC path was retired; the `antigravity_native.py` module header still
    says "delivered via the RPC" — that's stale doc-lag, the executor is authoritative).
-2. **Read path = RPC.** `antigravity_native_reader` polls/streams agy's connect-RPC
-   trajectory steps and mirrors them into the Omnigent session.
-3. **Control = RPC.** Interrupt is `CancelCascadeSteps`; a tool/permission prompt
-   is answered via `HandleCascadeUserInteraction` (surfaced as an Omnigent
-   elicitation).
+2. **Read path = RPC, then isolated transcript.** The reader prefers connect-RPC
+   trajectory steps. If local RPC is unavailable (including an unauthorized
+   heartbeat), it reads committed user/assistant records from this bridge's
+   transcript and uses the native Stop hook to finish the turn.
+3. **Control = RPC with a native terminal fallback.** Interrupt first attempts
+   `CancelCascadeSteps`, then sends Escape to the active session's tmux pane if
+   RPC cannot cancel. In transcript mode, permission prompts must be answered
+   in Terminal; the chat displays a notice explaining this.
+
+## Reply compatibility checks
+
+Use a disposable workspace and a separate local server/host for these tests.
+Set `OMNIGENT_CONFIG_HOME` and `OMNIGENT_DATA_DIR` to disposable directories,
+`OMNIGENT_ADMIN_CREDENTIALS_PATH` inside that data directory, and
+`OMNIGENT_DISABLE_KEYRING=1` for Omnigent processes. The native CLI keeps its
+existing vendor-managed sign-in. Do not inspect credentials or change Keychain
+permissions to run tests. Automated fixtures should stub native CLI discovery,
+authentication seeding, and subprocesses instead of touching the user's login.
+
+Test the fallback separately from successful RPC mirroring:
+
+- Send two turns, reload Chat, and check each prompt/reply appears once in order.
+- Include literal `</USER_REQUEST>`, Unicode, and multiple lines in a prompt;
+  verify the complete original user text survives mirroring.
+- Send another message while generation is active. Check both inputs and the
+  final reply arrive and the session becomes idle after the native turn ends.
+- Interrupt an active generation, then send a new turn and verify it succeeds.
+- Exercise a failed turn and ensure Chat exposes an error rather than an empty
+  response. Use deterministic fixtures for failures that cannot be provoked
+  safely through the vendor CLI.
+- Resume a session and ensure previous messages are not replayed as new output.
+- Inject delayed transcript writes and failed HTTP delivery in unit tests; turn
+  completion must follow successful forwarding of the relevant records.
+
+The Stop marker captures the complete transcript byte boundary present when
+the hook runs. Completion follows delivery through that boundary, relying on
+the native CLI committing its final transcript record before Stop. Validate
+that ordering when testing a new CLI version. UI cancellation records its own
+boundary after the native terminal confirms idle, because cancellation may
+not invoke Stop.
+
+The fallback mirrors committed text; native tool cards, streaming, and approval
+controls still require the RPC path or Terminal. Capture a Chat screenshot for
+review outside the repository. Keep live evidence separate from mocked tests.
 
 ## Prerequisites (check these first)
 

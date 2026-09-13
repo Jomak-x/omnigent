@@ -62,6 +62,84 @@ class _EventRecordingServerClient(NullServerClient):
         return self._Response()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("event_type", ["interrupt", "stop_session"])
+async def test_events_cancel_antigravity_native_without_inprocess_turn(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    event_type: str,
+) -> None:
+    """A native turn remains cancellable after the TUI injection task exits."""
+    from omnigent.harnesses.antigravity_native import bridge as agy_bridge
+    from omnigent.inner import antigravity_native_executor as agy_executor
+
+    conv_id = "fc7a9e4c3c4141bfb96d8ad662ea28cd"
+    bridge_id = "active-antigravity-bridge"
+    monkeypatch.setattr(agy_bridge, "_BRIDGE_ROOT", tmp_path / "agy-bridges")
+
+    class _LabelServerClient(NullServerClient):
+        async def get(self, url: str, **kwargs: Any) -> NullServerClient._Response:
+            if url == f"/v1/sessions/{conv_id}/labels":
+
+                class _Labels(self._Response):
+                    def json(self) -> dict[str, Any]:
+                        return {
+                            "labels": {
+                                agy_bridge.ANTIGRAVITY_NATIVE_BRIDGE_ID_LABEL_KEY: bridge_id
+                            }
+                        }
+
+                return _Labels()
+            return await super().get(url, **kwargs)
+
+    spec = AgentSpec(
+        spec_version=1,
+        name="t",
+        executor=ExecutorSpec(type="omnigent", config={"harness": "antigravity-native"}),
+    )
+
+    async def _resolver(agent_id: str, session_id: str | None = None) -> AgentSpec:
+        return spec
+
+    app = create_runner_app(
+        process_manager=_FakeProcessManager(_ScriptedHarnessClient([])),  # type: ignore[arg-type]
+        spec_resolver=_resolver,
+        server_client=_LabelServerClient(),  # type: ignore[arg-type]
+    )
+    calls: list[tuple[int, str]] = []
+    monkeypatch.setattr(agy_executor, "resolve_language_server_port", lambda cascade_id: 43210)
+    monkeypatch.setattr(
+        agy_executor,
+        "cancel_cascade_steps",
+        lambda port, cascade_id: calls.append((port, cascade_id)) or True,
+    )
+    monkeypatch.setattr(
+        agy_executor,
+        "interrupt_turn_via_tui",
+        lambda bridge_dir: pytest.fail("validated RPC should take precedence over TUI Escape"),
+    )
+    monkeypatch.setattr(agy_executor, "wait_for_turn_idle_via_tui", lambda bridge_dir: False)
+
+    async with _runner_client(app) as client:
+        created = await client.post(
+            "/v1/sessions", json={"session_id": conv_id, "agent_id": "agy-agent"}
+        )
+        assert created.status_code == 201, created.text
+        bridge_dir = agy_bridge.bridge_dir_for_bridge_id(bridge_id)
+        agy_bridge.write_bridge_state(
+            bridge_dir,
+            agy_bridge.AntigravityNativeBridgeState(
+                session_id=conv_id, conversation_id="agy-cascade-123"
+            ),
+        )
+        assert not app.state.active_turns.get(conv_id)
+
+        response = await client.post(f"/v1/sessions/{conv_id}/events", json={"type": event_type})
+
+    assert response.status_code == 204, response.text
+    assert calls == [(43210, "agy-cascade-123")]
+
+
 class _RecordingCodexAppServerClient:
     """
     Test double for Codex app-server JSON-RPC controls.
