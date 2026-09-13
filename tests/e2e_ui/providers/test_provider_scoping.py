@@ -92,9 +92,11 @@ def test_agent_scopes_defaults_detection_and_gateway_validation(
     writes: list[str] = []
     page.on(
         "request",
-        lambda request: writes.append(f"{request.method} {request.url}")
-        if request.method in {"POST", "PUT", "PATCH", "DELETE"}
-        else None,
+        lambda request: (
+            writes.append(f"{request.method} {request.url}")
+            if request.method in {"POST", "PUT", "PATCH", "DELETE"}
+            else None
+        ),
     )
     page.goto(runtime.url + "/settings/providers")
     page.get_by_test_id("settings-providers-host").click()
@@ -234,13 +236,17 @@ def test_agent_scopes_defaults_detection_and_gateway_validation(
     antigravity = page.get_by_test_id("setup-agent-antigravity")
     expect(antigravity).to_contain_text("Installation needed")
     antigravity.click()
-    expect(page.get_by_text("Installation needed · Fixture computer A", exact=True)).to_be_visible()
+    expect(
+        page.get_by_text("Installation needed · Fixture computer A", exact=True)
+    ).to_be_visible()
     expect(page.locator("body")).not_to_contain_text(CLAUDE_NOTICE)
     with (
         page.expect_request(f"**/v1/hosts/{HOST_IDS[0]}/setup/detect") as status_request,
         page.expect_response(
-            lambda response: response.url.endswith(f"/v1/hosts/{HOST_IDS[0]}/setup/detect")
-            and response.request.method == "POST"
+            lambda response: (
+                response.url.endswith(f"/v1/hosts/{HOST_IDS[0]}/setup/detect")
+                and response.request.method == "POST"
+            )
         ) as status_response,
     ):
         page.get_by_role("button", name="Check setup status", exact=True).click()
@@ -249,7 +255,9 @@ def test_agent_scopes_defaults_detection_and_gateway_validation(
         "harness": "antigravity-native",
         "availability": False,
     }
-    expect(page.get_by_text("Installation needed · Fixture computer A", exact=True)).to_be_visible()
+    expect(
+        page.get_by_text("Installation needed · Fixture computer A", exact=True)
+    ).to_be_visible()
     expect(page.locator("body")).not_to_contain_text(CLAUDE_NOTICE)
     page.screenshot(path=str(recordings / "antigravity-dark.png"), full_page=True)
 
@@ -259,7 +267,8 @@ def test_agent_scopes_defaults_detection_and_gateway_validation(
     page.reload()
     expect(page.get_by_test_id("settings-providers-host")).to_contain_text("Fixture computer A")
     expect(page.get_by_role("status")).to_contain_text(
-        "Fixture computer A is offline. Its settings cannot be read or changed until it reconnects; "
+        "Fixture computer A is offline. Its settings cannot be read or changed "
+        "until it reconnects; "
         "this selection will stay on Fixture computer A.",
     )
     expect(page.get_by_test_id("setup-agent-pi")).to_have_count(0)

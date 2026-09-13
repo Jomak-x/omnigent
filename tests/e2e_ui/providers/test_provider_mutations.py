@@ -201,10 +201,17 @@ def _check_acp_add_remove_and_import_fingerprint(runtime: ProviderSetupRuntime) 
     command = f"sh -c 'touch {marker}'"
     _action(
         runtime,
-        {"action": "add_acp", "name": "Mutation Agent", "command": command, "model": "fixture-acp"},
+        {
+            "action": "add_acp",
+            "name": "Mutation Agent",
+            "command": command,
+            "model": "fixture-acp",
+        },
     )
     assert not marker.exists(), "Saving ACP command data must not execute it"
-    agent = next(row for row in _config(runtime)["acp"]["agents"] if row["name"] == "Mutation Agent")
+    agent = next(
+        row for row in _config(runtime)["acp"]["agents"] if row["name"] == "Mutation Agent"
+    )
     assert agent["command"] == command
     _action(runtime, {"action": "remove_acp", "slug": "mutation-agent"})
     assert not _config(runtime).get("acp", {}).get("agents", [])
@@ -309,7 +316,9 @@ def _write_sanitized_state(runtime: ProviderSetupRuntime, recordings: Path) -> N
     (recordings / "mutation-state.json").write_text(json.dumps(state, indent=2))
 
 
-def exercise_provider_mutations(page: Page, runtime: ProviderSetupRuntime, recordings: Path) -> None:
+def exercise_provider_mutations(
+    page: Page, runtime: ProviderSetupRuntime, recordings: Path
+) -> None:
     """Exercise provider writes through real browser/server/host processes."""
     _select_host_and_open_codex(page, runtime)
     _add_catalog_key_in_browser(page)
