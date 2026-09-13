@@ -36,9 +36,9 @@ function groupLabel(option: NativeModelOption, effort: AntigravityEffort): strin
 }
 
 /**
- * Convert agy's flat model ids into picker rows only when the catalog contains
- * two or more actual effort siblings. A lone `-medium` id remains a model,
- * because the CLI did not advertise a choice to split out.
+ * Group only advertised Gemini effort siblings. Non-Gemini ids and lone
+ * siblings remain standalone choices because they offer no supported effort
+ * choice to split out.
  */
 export function antigravityModelGroups(
   options: readonly NativeModelOption[],

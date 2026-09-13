@@ -2687,6 +2687,7 @@ async def test_auto_create_antigravity_wires_reader_task_and_interaction_bridge(
     from omnigent.runner import app as runner_app_mod
 
     session_id = "b68c3f1da613f48fb4126e965ab594a3"
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
     monkeypatch.setattr(bridge_mod, "_BRIDGE_ROOT", tmp_path / "antigravity-native")
     monkeypatch.setenv("RUNNER_SERVER_URL", "http://ap.example")
     monkeypatch.setenv("OMNIGENT_RUNNER_WORKSPACE", str(tmp_path / "workspace"))
@@ -2868,6 +2869,7 @@ async def test_auto_create_antigravity_wires_omnigent_mcp_relay(
     from omnigent.runner import app as runner_app_mod
 
     session_id = "1fd85439049bbfc88cbf04221bad5079"
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
     monkeypatch.setattr(bridge_mod, "_BRIDGE_ROOT", tmp_path / "antigravity-native")
     monkeypatch.setenv("RUNNER_SERVER_URL", "http://ap.example")
     monkeypatch.setenv("OMNIGENT_RUNNER_WORKSPACE", str(tmp_path / "workspace"))
@@ -3010,6 +3012,7 @@ async def test_auto_create_antigravity_prepends_gemini_dir_to_generated_flags(
     from omnigent.runner import app as runner_app_mod
 
     session_id = "976793baf55bcdf96830aa376e394f80"
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
     monkeypatch.setattr(bridge_mod, "_BRIDGE_ROOT", tmp_path / "antigravity-native")
     monkeypatch.setenv("RUNNER_SERVER_URL", "http://ap.example")
     monkeypatch.setenv("OMNIGENT_RUNNER_WORKSPACE", str(tmp_path / "workspace"))
