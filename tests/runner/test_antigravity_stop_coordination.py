@@ -612,8 +612,9 @@ async def test_cancelled_stop_caller_retains_native_cancellation_before_later_tu
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("recovery", ["stop", "idle", "failed"])
 async def test_history_loading_message_waits_for_antigravity_stop_boundary(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, recovery: str
 ) -> None:
     from omnigent.harnesses.antigravity_native import bridge
     from omnigent.harnesses.claude_native import bridge as relay_bridge
@@ -666,7 +667,9 @@ async def test_history_loading_message_waits_for_antigravity_stop_boundary(
     monkeypatch.setattr(executor_mod, "turn_is_idle_via_tui", lambda _bridge: False)
     monkeypatch.setattr(executor_mod, "resolve_language_server_port", lambda _cascade: None)
     monkeypatch.setattr(executor_mod, "interrupt_turn_via_tui", _blocked_escape)
-    monkeypatch.setattr(executor_mod, "wait_for_turn_idle_via_tui", lambda _bridge: True)
+    monkeypatch.setattr(
+        executor_mod, "wait_for_turn_idle_via_tui", lambda _bridge: recovery == "stop"
+    )
     monkeypatch.setattr(
         executor_mod, "_record_confirmed_interruption_if_current", _record_boundary
     )
@@ -770,14 +773,44 @@ async def test_history_loading_message_waits_for_antigravity_stop_boundary(
             assert side_effects == []
 
             release_worker.set()
-            await asyncio.wait_for(boundary_started.wait(), timeout=3)
-            assert harness_client.posted_bodies == []
-            assert side_effects == ["escape"]
+            if recovery == "stop":
+                await asyncio.wait_for(boundary_started.wait(), timeout=3)
+                assert harness_client.posted_bodies == []
+                assert side_effects == ["escape"]
 
-            release_boundary.set()
-            stopped = await stop_request
-            assert stopped.status_code == 204, stopped.text
+                release_boundary.set()
+                stopped = await stop_request
+                assert stopped.status_code == 204, stopped.text
+            else:
+                stopped = await stop_request
+                assert stopped.status_code == 503, stopped.text
+                assert session_id not in app.state.active_turns
+                assert harness_client.posted_bodies == []
+                assert side_effects == ["escape"]
+                assert not boundary_started.is_set()
+                running = await client.post(
+                    f"/v1/sessions/{session_id}/events",
+                    json={"type": "external_session_status", "data": {"status": "running"}},
+                )
+                assert running.status_code == 204, running.text
+                assert harness_client.posted_bodies == []
+                assert len(app.state.session_message_buffers[session_id]) == 2
+                completed = await client.post(
+                    f"/v1/sessions/{session_id}/events",
+                    json={"type": "external_session_status", "data": {"status": recovery}},
+                )
+                assert completed.status_code == 204, completed.text
             await _wait_until(lambda: len(harness_client.posted_bodies) == 2)
+            await _wait_until(lambda: session_id not in app.state.active_turns)
+            assert not app.state.session_message_buffers.get(session_id)
+            if recovery != "stop":
+                replayed = await client.post(
+                    f"/v1/sessions/{session_id}/events",
+                    json={"type": "external_session_status", "data": {"status": recovery}},
+                )
+                assert replayed.status_code == 204, replayed.text
+                await app.state.check_and_start_next_turn(session_id)
+                assert len(harness_client.posted_bodies) == 2
     finally:
         server_client.release_history.set()
         release_worker.set()
@@ -791,7 +824,11 @@ async def test_history_loading_message_waits_for_antigravity_stop_boundary(
         runner_app._session_inboxes_ref.pop(session_id, None)
         runner_app._session_event_queues_ref.pop(session_id, None)
 
-    assert side_effects == ["escape", "boundary", "dispatch", "dispatch"]
+    assert side_effects == (
+        ["escape", "boundary", "dispatch", "dispatch"]
+        if recovery == "stop"
+        else ["escape", "dispatch", "dispatch"]
+    )
     assert dispatched_user_texts == [
         ["first web message"],
         ["first web message", "second web message"],

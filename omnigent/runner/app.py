@@ -9158,8 +9158,9 @@ def create_runner_app(
                     _antigravity_pending_stops[conversation_id] = True
                 else:
                     occupant = _active_turns.get(conversation_id)
-                    if conversation_id in _active_turns and (
-                        occupant is None or occupant.done()
+                    if (occupant is None or occupant.done()) and (
+                        conversation_id in _active_turns
+                        or _session_message_buffers.get(conversation_id)
                     ):
                         _on_proxy_stream_end(conversation_id)
             if delivery_ack is not None:
