@@ -1805,16 +1805,25 @@ def send_interaction_keys_via_tui(
 
 
 def _agy_footer_state(pane: str) -> str | None:
-    """Classify agy's state from its final non-empty footer line."""
-    for line in reversed(pane.splitlines()):
-        footer = line.strip()
-        if not footer:
-            continue
-        if footer == _AGY_ACTIVE_MARKER:
-            return "active"
-        if footer == _AGY_IDLE_MARKER:
-            return "idle"
+    """Classify agy's bottom footer, including its right-hand model column."""
+    lines = [line.rstrip() for line in pane.splitlines() if line.strip()]
+    if not lines:
         return None
+    footer = lines[-1]
+    for marker, state in (
+        (_AGY_ACTIVE_MARKER, "active"),
+        (_AGY_IDLE_MARKER, "idle"),
+    ):
+        suffix = footer.removeprefix(marker) if footer.startswith(marker) else ""
+        if footer.strip() == marker or (suffix.startswith("  ") and suffix.strip()):
+            return state
+        if (
+            len(lines) >= 3
+            and _agy_separator_line(lines[-3])
+            and lines[-2] == marker
+            and footer.startswith(" " * (len(marker) + 2))
+        ):
+            return state
     return None
 
 

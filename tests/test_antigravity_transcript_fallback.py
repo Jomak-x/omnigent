@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 import shlex
+from collections.abc import AsyncIterator
 from pathlib import Path
 
 import httpx
@@ -309,6 +312,121 @@ async def test_two_transcript_turns_mirror_once_and_close_on_stop(
         "assistant",
     ]
     assert len({item["source_id"] for item in messages}) == 4
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("resumed", [False, True])
+async def test_discovery_rotates_used_binding_before_mirroring_new_cascade(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, resumed: bool
+) -> None:
+    bridge_dir = tmp_path / "bridge"
+    old_transcript, cache = _session_files(bridge_dir)
+    if resumed:
+        old_transcript.write_text(
+            _step(0, "USER_EXPLICIT", "USER_INPUT", "<USER_REQUEST>old user</USER_REQUEST>")
+            + _step(1, "MODEL", "PLANNER_RESPONSE", "old answer")
+        )
+    transcript.prepare_transcript_capture(bridge_dir)
+    write_bridge_state(
+        bridge_dir,
+        AntigravityNativeBridgeState(session_id="old-session", conversation_id=CONVERSATION_ID),
+    )
+    sessions: dict[str, dict[str, object]] = {
+        "old-session": {
+            "agent_id": "antigravity",
+            "runner_id": "runner-one",
+            "labels": {"antigravity_native_bridge_id": "bridge-one"},
+            "external_session_id": CONVERSATION_ID if resumed else None,
+        }
+    }
+    messages: list[tuple[str, str]] = []
+    transfers: list[dict[str, object]] = []
+    finished = asyncio.Event()
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content) if request.content else {}
+        if request.url.path == "/v1/sessions":
+            sessions["new-session"] = body
+            return httpx.Response(201, json={"id": "new-session"})
+        session_id = request.url.path.split("/")[3]
+        if request.method == "GET":
+            return httpx.Response(200, json=sessions[session_id])
+        if request.method == "PATCH":
+            external_id = body.get("external_session_id")
+            if external_id and sessions[session_id].get("external_session_id") not in (
+                None,
+                external_id,
+            ):
+                return httpx.Response(400)
+            sessions[session_id].update(body)
+        elif request.url.path.endswith("/transfer"):
+            transfers.append(body)
+        elif request.url.path.endswith("/events"):
+            if body["type"] == "external_conversation_item":
+                messages.append((session_id, body["data"]["item_data"]["content"][0]["text"]))
+            elif body["type"] == "external_session_status" and body["data"]["status"] == "idle":
+                finished.set()
+        else:
+            raise AssertionError(request.url)
+        return httpx.Response(200, json={})
+
+    @contextlib.asynccontextmanager
+    async def open_client(*_args: object, **_kwargs: object) -> AsyncIterator[httpx.AsyncClient]:
+        async with httpx.AsyncClient(
+            base_url="http://test", transport=httpx.MockTransport(handle)
+        ) as client:
+            yield client
+
+    cleared = False
+
+    async def sleep(_duration: float) -> None:
+        nonlocal cleared
+        if not cleared:
+            cleared = True
+            new_transcript = (
+                old_transcript.parents[3]
+                / OTHER_ID
+                / ".system_generated"
+                / "logs"
+                / "transcript_full.jsonl"
+            )
+            new_transcript.parent.mkdir(parents=True)
+            new_transcript.write_text(
+                _step(0, "USER_EXPLICIT", "USER_INPUT", "<USER_REQUEST>new user</USER_REQUEST>")
+                + _step(1, "MODEL", "PLANNER_RESPONSE", "new answer")
+            )
+            cache.write_text(json.dumps({"/scratch": OTHER_ID}))
+            record_stop_event(bridge_dir, {"conversationId": OTHER_ID, "fullyIdle": True})
+        await asyncio.sleep(0)
+
+    monkeypatch.setattr("omnigent.cli_auth.open_server_client", open_client)
+    monkeypatch.setattr(reader, "_resolve_rpc_port", lambda _cascade: None)
+    monkeypatch.setattr(reader, "_sleep", sleep)
+    task = asyncio.create_task(
+        reader.run_reader_with_bridge(
+            base_url="http://test",
+            headers={},
+            auth=None,
+            session_id="old-session",
+            bridge_dir=bridge_dir,
+        )
+    )
+    try:
+        await asyncio.wait_for(finished.wait(), timeout=3)
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    expected_session = "new-session" if resumed else "old-session"
+    assert messages == [(expected_session, "new user"), (expected_session, "new answer")]
+    assert transfers == ([{"target_session_id": "new-session"}] if resumed else [])
+    state = bridge.read_bridge_state(bridge_dir)
+    assert state is not None
+    assert (state.session_id, state.conversation_id) == (expected_session, OTHER_ID)
+    assert sessions[expected_session]["external_session_id"] == OTHER_ID
+    if resumed:
+        assert sessions["old-session"]["external_session_id"] == CONVERSATION_ID
 
 
 @pytest.mark.asyncio

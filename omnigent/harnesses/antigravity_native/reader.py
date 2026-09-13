@@ -1270,10 +1270,18 @@ async def supervise_reader(
     )
     if discovered is None:
         return None
+    cascade_id = (
+        discovered.conversation_id if isinstance(discovered, TranscriptBinding) else discovered[0]
+    )
+    bound_cascade_id = _resolve_cascade_id(bridge_dir)
+    if bound_cascade_id != cascade_id:
+        if bound_cascade_id is not None and initial_tail_state(bridge_dir, bound_cascade_id)[0] > 0:
+            if committed_steps_out is not None:
+                committed_steps_out.append(1)
+            return cascade_id
+        _adopt_cascade_in_place(bridge_dir, session_id, cascade_id)
+        await _record_external_session_id(client, session_id, cascade_id)
     if isinstance(discovered, TranscriptBinding):
-        if _resolve_cascade_id(bridge_dir) != discovered.conversation_id:
-            _adopt_cascade_in_place(bridge_dir, session_id, discovered.conversation_id)
-            await _record_external_session_id(client, session_id, discovered.conversation_id)
         await _record_read_mode(client, session_id, transcript_fallback=True)
         return await _supervise_transcript(
             bridge_dir,
@@ -1286,9 +1294,6 @@ async def supervise_reader(
             skip_cascade_ids=skip_cascade_ids,
         )
     cascade_id, port = discovered
-    if _resolve_cascade_id(bridge_dir) != cascade_id:
-        _adopt_cascade_in_place(bridge_dir, session_id, cascade_id)
-        await _record_external_session_id(client, session_id, cascade_id)
     await _record_read_mode(client, session_id, transcript_fallback=False)
 
     # One set of cross-poll/cross-frame trackers per reader run, shared by BOTH
@@ -3279,7 +3284,7 @@ async def _record_external_session_id(
 
     So a later ``omnigent antigravity --resume`` / omnigent server restart
     relaunches agy with ``--conversation <cascade_id>`` and continues THIS
-    conversation. Called on first-cascade adoption with the TUI-minted cascade.
+    conversation. Called on first-cascade adoption and successful session rotation.
 
     The cold-start no longer records its headless ``StartCascade`` phantom (which
     the agy TUI never displays) — that was the data-loss bug: a resume launched
@@ -3365,13 +3370,9 @@ async def _rotate_session_for_cascade(
        owns it), when the old session had one.
     4. POST the terminal ``/transfer`` to move the live agy tmux pane old→new (the
        pane — the SAME agy process — keeps running under the new conversation).
-       NO ``external_session_id`` PATCH is made: unlike a resume launch, the new
-       cascade ``new_cascade_id`` is ALREADY live on the existing agy and reached via
-       the rewritten bridge state below, not via a later ``--resume``. (The old code
-       PATCHed it, which 400'd on the auto-cold-started session's already-set,
-       set-once-immutable field and looped the rotation — see the module header.)
     5. Rewrite agy bridge state in ``bridge_dir`` with the new session id + new
        conversation id (the reader re-reads this on rebind to bind the new cascade).
+       Record the new session's resume id best-effort, without blocking rotation.
     6. PATCH the old session's ``runner_id`` to ``""`` to release it (best-effort;
        a failure is logged, not raised — the new session is already live).
 
@@ -3455,6 +3456,7 @@ async def _rotate_session_for_cascade(
             conversation_id=new_cascade_id,
         ),
     )
+    await _record_external_session_id(client, new_session_id, new_cascade_id)
 
     # Release the old session's runner binding (best-effort): the new session is
     # already serving, so a failure here is logged, not raised.
