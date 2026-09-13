@@ -319,6 +319,7 @@ async def test_stop_waits_for_retained_adapter_injection_before_native_ack(
     )
     retry_started = asyncio.Event()
     release_retry = threading.Event()
+    native_active = threading.Event()
     paste_calls: list[str] = []
     loop = asyncio.get_running_loop()
 
@@ -330,6 +331,7 @@ async def test_stop_waits_for_retained_adapter_injection_before_native_ack(
             loop.call_soon_threadsafe(retry_started.set)
             if not release_retry.wait(timeout=5):
                 raise RuntimeError("test retry injection was not released")
+            native_active.set()
 
     monkeypatch.setattr(
         bridge,
@@ -352,11 +354,13 @@ async def test_stop_waits_for_retained_adapter_injection_before_native_ack(
         lambda: AntigravityNativeExecutor(bridge_dir=bridge_dir),
     )
     monkeypatch.setenv(bridge.ANTIGRAVITY_NATIVE_REQUEST_SESSION_ID_ENV_VAR, child_id)
-    native_ack_calls: list[Path] = []
+    native_cancellations: list[Path] = []
 
     async def _native_ack(bridge_path: Path, *, expected_session_id: str | None) -> bool:
         assert expected_session_id == child_id
-        native_ack_calls.append(bridge_path)
+        if native_active.is_set():
+            native_cancellations.append(bridge_path)
+            native_active.clear()
         return True
 
     monkeypatch.setattr(executor_mod, "interrupt_bridge_turn", _native_ack)
@@ -417,7 +421,7 @@ async def test_stop_waits_for_retained_adapter_injection_before_native_ack(
             )
 
             assert timed_out.status_code == 503
-            assert native_ack_calls == []
+            assert native_cancellations == []
             assert harness_client.interrupt_posts == 1
             assert paste_calls == ["first turn", "first turn"]
             assert not [
@@ -445,5 +449,6 @@ async def test_stop_waits_for_retained_adapter_injection_before_native_ack(
 
     assert confirmed.status_code == 204, confirmed.text
     assert harness_client.interrupt_posts == 2
-    assert native_ack_calls == [bridge_dir]
+    assert native_cancellations == [bridge_dir]
+    assert not native_active.is_set()
     assert paste_calls == ["first turn", "first turn"]

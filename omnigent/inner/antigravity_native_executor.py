@@ -120,6 +120,7 @@ class AntigravityNativeExecutor(Executor):
         # to agy at once or deliver out of order.
         self._send_lock = asyncio.Lock()
         self._delivery_epoch = 0
+        self._interrupt_task: asyncio.Task[bool] | None = None
 
     def supports_streaming(self) -> bool:
         """:returns: ``False`` — assistant output is emitted by the RPC read driver."""
@@ -175,10 +176,19 @@ class AntigravityNativeExecutor(Executor):
         """
         del session_key
         self._delivery_epoch += 1
+        if self._interrupt_task is None or self._interrupt_task.done():
+            self._interrupt_task = asyncio.create_task(self._interrupt_under_send_lock())
+        return await asyncio.shield(self._interrupt_task)
+
+    async def _interrupt_under_send_lock(self) -> bool:
         async with self._send_lock:
-            return await interrupt_bridge_turn(
-                self._bridge_dir, expected_session_id=self._request_session_id
-            )
+            try:
+                return await interrupt_bridge_turn(
+                    self._bridge_dir, expected_session_id=self._request_session_id
+                )
+            except (OSError, RuntimeError):
+                _logger.exception("Antigravity native cancellation failed")
+                return False
 
     async def run_turn(
         self,

@@ -14,8 +14,10 @@ wiring — what text it delivers and how it maps success/failure to events.
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -625,6 +627,106 @@ async def test_interrupt_waits_for_inflight_tui_injection(
         await interruption
     assert actions == ["injected", "cancelled"]
     assert delivery.cancelled() is cancel_delivery
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("blocked_stage", ["escape", "boundary"])
+async def test_timed_out_interrupt_owns_workers_until_next_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, blocked_stage: str
+) -> None:
+    from omnigent.harnesses.antigravity_native.stop_hook import STOP_EVENTS_FILE
+    from omnigent.inner.antigravity_native_harness import AntigravityNativeExecutorAdapter
+    from omnigent.runtime.harnesses import _executor_adapter
+
+    _seed_state(tmp_path)
+    app_dir = tmp_path / "agy-home" / ".gemini" / "antigravity-cli"
+    cache = app_dir / "cache" / "last_conversations.json"
+    cache.parent.mkdir(parents=True)
+    cache.write_text(json.dumps({"workspace": _CONVERSATION_ID}))
+    transcript_path = (
+        app_dir
+        / "brain"
+        / _CONVERSATION_ID
+        / ".system_generated"
+        / "logs"
+        / "transcript_full.jsonl"
+    )
+    transcript_path.parent.mkdir(parents=True)
+    transcript_path.write_text("{}\n")
+    executor = _executor(tmp_path)
+    adapter = AntigravityNativeExecutorAdapter()
+    adapter._native_executor = executor
+    loop = asyncio.get_running_loop()
+    worker_started = asyncio.Event()
+    release_worker = threading.Event()
+    actions: list[tuple[str, int]] = []
+    generation = [0]
+    active = [True]
+    original_record = executor_mod.record_stop_event
+
+    def _block(stage: str) -> None:
+        if stage == blocked_stage:
+            loop.call_soon_threadsafe(worker_started.set)
+            if not release_worker.wait(timeout=5):
+                raise RuntimeError("test cancellation worker was not released")
+
+    def _escape(_bridge: Path, **_kwargs: object) -> bool:
+        _block("escape")
+        actions.append(("escape", generation[0]))
+        active[0] = False
+        return True
+
+    def _record(bridge_dir: Path, payload: object) -> bool:
+        _block("boundary")
+        actions.append(("marker", generation[0]))
+        return original_record(bridge_dir, payload)
+
+    def _inject(_bridge: Path, *, content: str) -> None:
+        generation[0] += 1
+        active[0] = True
+        actions.append((content, generation[0]))
+
+    monkeypatch.setattr(_executor_adapter, "_INTERRUPT_SLICE_S", 0.01)
+    monkeypatch.setattr(executor_mod, "turn_is_idle_via_tui", lambda _bridge: not active[0])
+    monkeypatch.setattr(executor_mod, "resolve_language_server_port", lambda _cascade: None)
+    monkeypatch.setattr(executor_mod, "interrupt_turn_via_tui", _escape)
+    monkeypatch.setattr(executor_mod, "wait_for_turn_idle_via_tui", lambda _bridge: not active[0])
+    monkeypatch.setattr(executor_mod, "record_stop_event", _record)
+    monkeypatch.setattr(executor_mod, "inject_user_message_via_tui", _inject)
+    cleanup = asyncio.create_task(adapter._safe_interrupt(executor, "main"))
+    pending: list[asyncio.Task[Any]] = []
+    try:
+        await asyncio.wait_for(worker_started.wait(), timeout=2)
+        assert await asyncio.wait_for(cleanup, timeout=1)
+        for _ in range(2):
+            waiter = asyncio.create_task(executor.interrupt_session("main"))
+            await asyncio.sleep(0)
+            waiter.cancel()
+            waiter.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await waiter
+
+        next_stop = asyncio.create_task(adapter._handle_interrupt_event())
+        pending.append(next_stop)
+        await asyncio.sleep(0)
+        next_turn = asyncio.create_task(executor.enqueue_session_message("main", "next turn"))
+        pending.append(next_turn)
+        await asyncio.sleep(0)
+        assert not next_stop.done()
+        assert not next_turn.done()
+        assert actions == ([] if blocked_stage == "escape" else [("escape", 0)])
+        release_worker.set()
+        assert (await asyncio.wait_for(next_stop, timeout=2)).status_code == 204
+        assert await asyncio.wait_for(next_turn, timeout=2)
+        assert actions == [("escape", 0), ("marker", 0), ("next turn", 1)]
+        markers = (tmp_path / STOP_EVENTS_FILE).read_text().splitlines()
+        assert len(markers) == 1
+        assert json.loads(markers[0])["cancelled"] is True
+    finally:
+        release_worker.set()
+        await asyncio.gather(cleanup, *pending, return_exceptions=True)
+        if executor._interrupt_task is not None:
+            await asyncio.gather(executor._interrupt_task, return_exceptions=True)
 
 
 @pytest.mark.asyncio

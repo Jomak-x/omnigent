@@ -65,18 +65,31 @@ evicted lazily on the next :func:`record` / :func:`snapshot_for` /
 
 from __future__ import annotations
 
+import base64
+import binascii
 import copy
+import hashlib
+import re
 import threading
 import time
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
+
+from omnigent.inner.native_attachments import (
+    MIME_TO_EXT,
+    parse_data_uri,
+    unresolved_attachment_marker,
+)
 
 # A pending entry is evicted this many seconds after it was recorded
 # if it was never drained by a matching persisted message. Covers the
 # vendor-TUI-never-accepted-the-message ghost; long enough that a slow
 # transcript round-trip on a busy session still drains normally.
 _TTL_S: float = 600.0
+_ANTIGRAVITY_ATTACHMENT_MARKER_RE = re.compile(r"\[Attached: (?P<path>.+)\]")
+_MARKER_UNSAFE_FILENAME_CHARACTERS = re.compile(r"[\[\]\r\n]")
 
 
 def _now() -> float:
@@ -340,9 +353,6 @@ def restore(conversation_id: str, drained: DrainedInput) -> None:
 def resolve_matching_text(
     conversation_id: str,
     text: str,
-    *,
-    discard_before_match: bool = True,
-    normalize_text: bool = True,
 ) -> MatchedDrain:
     """
     Drain through the first pending entry whose text matches ``text``.
@@ -356,16 +366,10 @@ def resolve_matching_text(
 
     :param conversation_id: Conversation/session id, e.g. ``"conv_abc123"``.
     :param text: Accepted prompt text mirrored from Kiro's structured JSONL.
-    :param discard_before_match: Whether entries before the matched prompt are
-        also drained. Kiro treats them as failed injections; transcript readers
-        with independently typed prompts leave them queued.
-    :param normalize_text: Whether whitespace is normalized before comparing.
-        Kiro's structured prompt text is normalized; transcript readers that
-        preserve committed user text compare it exactly.
     :returns: Matched entry plus older skipped entries, or no match with an
         empty skipped list when the text was typed directly in the TUI.
     """
-    needle = _normalize_text(text) if normalize_text else text
+    needle = _normalize_text(text)
     if not needle:
         return MatchedDrain(matched=None, skipped=[])
     with _lock:
@@ -376,9 +380,7 @@ def resolve_matching_text(
         ordered = list(entries.items())
         match_index: int | None = None
         for index, (_pending_id, entry) in enumerate(ordered):
-            entry_text = _content_text(entry.content)
-            if normalize_text:
-                entry_text = _normalize_text(entry_text)
+            entry_text = _normalize_text(_content_text(entry.content))
             # Exact match only: an unanchored suffix check ("noyes".endswith("yes"))
             # can pick an unrelated queued entry whenever its text happens to trail
             # a different accepted prompt, handing that entry's file attachments to
@@ -389,12 +391,9 @@ def resolve_matching_text(
                 break
         if match_index is None:
             return MatchedDrain(matched=None, skipped=[])
-        skipped_entries = ordered[:match_index] if discard_before_match else []
+        skipped_entries = ordered[:match_index]
         _matched_id, matched_entry = ordered[match_index]
-        consumed_entries = (
-            ordered[: match_index + 1] if discard_before_match else [ordered[match_index]]
-        )
-        for pending_id, _entry in consumed_entries:
+        for pending_id, _entry in ordered[: match_index + 1]:
             entries.pop(pending_id, None)
         if not entries:
             _pending.pop(conversation_id, None)
@@ -402,6 +401,27 @@ def resolve_matching_text(
             matched=_drained_input(matched_entry),
             skipped=[_drained_input(entry) for _pending_id, entry in skipped_entries],
         )
+
+
+def resolve_matching_antigravity_text(conversation_id: str, text: str) -> DrainedInput | None:
+    """Drain the pending input whose Antigravity transport text equals ``text``."""
+    with _lock:
+        _evict_stale_locked(conversation_id, _now())
+        entries = _pending.get(conversation_id)
+        if entries is None:
+            return None
+        matches = [
+            (pending_id, entry)
+            for pending_id, entry in entries.items()
+            if _matches_antigravity_transport(entry.content, text)
+        ]
+        if len(matches) != 1:
+            return None
+        pending_id, entry = matches[0]
+        entries.pop(pending_id)
+        if not entries:
+            _pending.pop(conversation_id, None)
+        return _drained_input(entry)
 
 
 def has_pending(conversation_id: str) -> bool:
@@ -481,6 +501,93 @@ def _content_text(content: list[dict[str, Any]]) -> str:
             text = block.get("text")
             if isinstance(text, str):
                 parts.append(text)
+    return "\n".join(parts)
+
+
+def _matches_antigravity_transport(content: list[dict[str, Any]], text: str) -> bool:
+    attachments = _attachment_blocks(content)
+    content_text = _antigravity_content_text(content)
+    if not attachments:
+        return text == content_text.strip()
+    lines = text.split("\n")
+    if len(lines) < len(attachments) or not all(
+        _matches_antigravity_attachment_marker(block, line)
+        for block, line in zip(attachments, lines[: len(attachments)], strict=True)
+    ):
+        return False
+    return "\n".join(lines[len(attachments) :]) == content_text.rstrip()
+
+
+def _attachment_blocks(content: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        block
+        for block in content
+        if isinstance(block, dict) and block.get("type") in {"input_image", "input_file"}
+    ]
+
+
+def _matches_antigravity_attachment_marker(block: dict[str, Any], line: str) -> bool:
+    if line == unresolved_attachment_marker(block):
+        return True
+    match = _ANTIGRAVITY_ATTACHMENT_MARKER_RE.fullmatch(line)
+    if match is None:
+        return False
+    filename = block.get("filename")
+    path = match.group("path")
+    parts = path.rsplit("/", 2)
+    if len(parts) != 3 or parts[1] != "uploads":
+        return False
+    actual_name = parts[2]
+    if isinstance(filename, str) and filename:
+        expected = _MARKER_UNSAFE_FILENAME_CHARACTERS.sub("_", filename.rsplit("/", 1)[-1])
+        if actual_name == expected:
+            return True
+        raw = _attachment_bytes(block)
+        expected_path = Path(expected)
+        collision_pattern = (
+            rf"{re.escape(expected_path.stem)}_[0-9a-f]{{12}}"
+            rf"{re.escape(expected_path.suffix)}"
+        )
+        if raw is None:
+            return re.fullmatch(collision_pattern, actual_name) is not None
+        return actual_name == (
+            f"{expected_path.stem}_{hashlib.sha256(raw).hexdigest()[:12]}"
+            f"{expected_path.suffix}"
+        )
+    extension = _attachment_extension(block)
+    return extension is not None and re.fullmatch(
+        rf"attachment_[0-9a-f]{{8}}{re.escape(extension)}", actual_name
+    ) is not None
+
+
+def _attachment_bytes(block: dict[str, Any]) -> bytes | None:
+    data_uri = block.get("image_url") or block.get("file_data")
+    if not isinstance(data_uri, str) or not data_uri.startswith("data:"):
+        return None
+    try:
+        return base64.b64decode(parse_data_uri(data_uri).base64_payload)
+    except (ValueError, binascii.Error):
+        return None
+
+
+def _attachment_extension(block: dict[str, Any]) -> str | None:
+    data_uri = block.get("image_url") or block.get("file_data")
+    if not isinstance(data_uri, str) or not data_uri.startswith("data:"):
+        return None
+    try:
+        return MIME_TO_EXT.get(parse_data_uri(data_uri).mime_type, "")
+    except ValueError:
+        return None
+
+
+def _antigravity_content_text(content: list[dict[str, Any]]) -> str:
+    parts: list[str] = []
+    for block in content:
+        if not isinstance(block, dict) or block.get("type") not in {"input_text", "text"}:
+            continue
+        text = block.get("text")
+        if isinstance(text, str) and text:
+            parts.append(text)
     return "\n".join(parts)
 
 

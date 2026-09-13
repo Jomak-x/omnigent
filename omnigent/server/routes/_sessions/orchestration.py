@@ -2426,12 +2426,7 @@ async def _persist_external_conversation_item(
             and native_agent.harness == "antigravity-native"
         ):
             text = _message_text(item.data.content) or ""
-            drained = pending_inputs.resolve_matching_text(
-                session_id,
-                text,
-                discard_before_match=False,
-                normalize_text=False,
-            ).matched
+            drained = pending_inputs.resolve_matching_antigravity_text(session_id, text)
         else:
             drained = pending_inputs.resolve_oldest(session_id)
         if drained is not None:

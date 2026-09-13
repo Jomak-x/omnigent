@@ -9,6 +9,7 @@ parallel. ``data.source_id`` makes the persist idempotent.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,7 @@ import pytest
 
 from omnigent.harnesses.antigravity_native import reader, transcript
 from omnigent.harnesses.antigravity_native.stop_hook import record_stop_event
+from omnigent.inner.antigravity_native_executor import _content_to_text
 from omnigent.runtime import pending_inputs
 from tests.server.helpers import create_test_agent
 
@@ -176,46 +178,196 @@ async def test_transcript_reader_restart_dedupes_items_and_preserves_next_pendin
 
 
 async def test_antigravity_native_steering_does_not_consume_queued_web_input(
-    client: httpx.AsyncClient,
+    client: httpx.AsyncClient, tmp_path: Path
 ) -> None:
     session_id = await _create_session(
         client,
         "agy-native-steering-pending-input",
         labels={"omnigent.wrapper": "antigravity-native-ui"},
     )
-    pending_id = pending_inputs.record(
+    first_content = [
+        {
+            "type": "input_image",
+            "file_id": "file_first",
+            "filename": "first.png",
+        },
+        {"type": "input_text", "text": "  queued Δ input  "},
+    ]
+    first_transport_content = [
+        {**first_content[0], "image_url": "data:image/png;base64,aGVsbG8="},
+        first_content[1],
+    ]
+    second_content = [
+        {
+            "type": "input_file",
+            "file_id": "file_second",
+            "filename": "second.txt",
+        }
+    ]
+    second_transport_content = [
+        {**second_content[0], "file_data": "data:text/plain;base64,aGVsbG8="}
+    ]
+    collision_content = [
+        {
+            "type": "input_file",
+            "file_id": "file_collision",
+            "filename": "first.png",
+        },
+        {"type": "input_text", "text": "collision Δ"},
+    ]
+    collision_transport_content = [
+        {**collision_content[0], "file_data": "data:text/plain;base64,d29ybGQ="},
+        collision_content[1],
+    ]
+    unnamed_content = [
+        {
+            "type": "input_file",
+            "file_id": "file_unnamed",
+            "file_data": "data:text/plain;base64,dW5uYW1lZA==",
+        }
+    ]
+    bare_text_content = [
+        {"type": "input_text", "text": "  leading "},
+        {"type": "text", "text": ""},
+        {"type": "text", "text": "\nΔ input  "},
+        {"type": "output_text", "text": "ignored"},
+    ]
+    first_pending_id = pending_inputs.record(
         session_id,
-        [
-            {"type": "input_image", "file_id": "file_web", "filename": "web.png"},
-            {"type": "input_text", "text": "queued\nΔ input"},
-        ],
+        first_content,
         created_by="web@example.com",
+    )
+    second_pending_id = pending_inputs.record(
+        session_id, second_content, created_by="web@example.com"
+    )
+    collision_pending_id = pending_inputs.record(
+        session_id, collision_content, created_by="web@example.com"
+    )
+    unnamed_pending_id = pending_inputs.record(
+        session_id, unnamed_content, created_by="web@example.com"
+    )
+    bare_text_pending_id = pending_inputs.record(
+        session_id, bare_text_content, created_by="web@example.com"
     )
 
     await _post_item(
         client,
         session_id,
-        text="queued Δ input",
+        text="[Attached: /tmp/other/uploads/other.png]\n  queued Δ input",
         source_id="agy-transcript:cascade:user:1:native",
     )
     steering = (await client.get(f"/v1/sessions/{session_id}/items")).json()["data"][0]
-    assert steering["content"] == [{"type": "input_text", "text": "queued Δ input"}]
+    assert steering["content"] == [
+        {
+            "type": "input_text",
+            "text": "[Attached: /tmp/other/uploads/other.png]\n  queued Δ input",
+        }
+    ]
     assert "created_by" not in steering
-    assert [entry["pending_id"] for entry in pending_inputs.snapshot_for(session_id)] == [pending_id]
+    assert [entry["pending_id"] for entry in pending_inputs.snapshot_for(session_id)] == [
+        first_pending_id,
+        second_pending_id,
+        collision_pending_id,
+        unnamed_pending_id,
+        bare_text_pending_id,
+    ]
 
-    await _post_item(
+    first_text = _content_to_text(first_transport_content, tmp_path / "bridge")
+    first = await _post_item(
         client,
         session_id,
-        text="queued\nΔ input",
+        text=first_text,
         source_id="agy-transcript:cascade:user:2:web",
     )
     items = (await client.get(f"/v1/sessions/{session_id}/items")).json()["data"]
     web_input = items[1]
     assert web_input["content"] == [
-        {"type": "input_image", "file_id": "file_web", "filename": "web.png"},
-        {"type": "input_text", "text": "queued\nΔ input"},
+        first_content[0],
+        {"type": "input_text", "text": first_text},
     ]
     assert web_input["created_by"] == "web@example.com"
+    assert [entry["pending_id"] for entry in pending_inputs.snapshot_for(session_id)] == [
+        second_pending_id,
+        collision_pending_id,
+        unnamed_pending_id,
+        bare_text_pending_id,
+    ]
+
+    duplicate = await _post_item(
+        client,
+        session_id,
+        text=first_text,
+        source_id="agy-transcript:cascade:user:2:web",
+    )
+    assert duplicate["item_id"] == first["item_id"]
+    assert [entry["pending_id"] for entry in pending_inputs.snapshot_for(session_id)] == [
+        second_pending_id,
+        collision_pending_id,
+        unnamed_pending_id,
+        bare_text_pending_id,
+    ]
+
+    second_text = _content_to_text(second_transport_content, tmp_path / "bridge")
+    await _post_item(
+        client,
+        session_id,
+        text=second_text,
+        source_id="agy-transcript:cascade:user:3:web",
+    )
+    items = (await client.get(f"/v1/sessions/{session_id}/items")).json()["data"]
+    attachment_only = items[2]
+    assert attachment_only["content"] == [
+        second_content[0],
+        {"type": "input_text", "text": second_text},
+    ]
+    assert attachment_only["created_by"] == "web@example.com"
+    assert [entry["pending_id"] for entry in pending_inputs.snapshot_for(session_id)] == [
+        collision_pending_id,
+        unnamed_pending_id,
+        bare_text_pending_id,
+    ]
+
+    collision_text = _content_to_text(collision_transport_content, tmp_path / "bridge")
+    assert re.fullmatch(
+        r"\[Attached: .*/uploads/first_[0-9a-f]{12}\.png\]\ncollision Δ",
+        collision_text,
+    )
+    await _post_item(
+        client,
+        session_id,
+        text=collision_text,
+        source_id="agy-transcript:cascade:user:4:web",
+    )
+    unnamed_text = _content_to_text(unnamed_content, tmp_path / "bridge")
+    assert re.fullmatch(
+        r"\[Attached: .*/uploads/attachment_[0-9a-f]{8}\.txt\]", unnamed_text
+    )
+    await _post_item(
+        client,
+        session_id,
+        text=unnamed_text,
+        source_id="agy-transcript:cascade:user:5:web",
+    )
+    bare_text = _content_to_text(bare_text_content, tmp_path / "bridge")
+    await _post_item(
+        client,
+        session_id,
+        text=bare_text,
+        source_id="agy-transcript:cascade:user:6:web",
+    )
+    items = (await client.get(f"/v1/sessions/{session_id}/items")).json()["data"]
+    assert items[3]["content"] == [
+        collision_content[0],
+        {"type": "input_text", "text": collision_text},
+    ]
+    assert items[3]["created_by"] == "web@example.com"
+    assert items[4]["content"] == [
+        unnamed_content[0],
+        {"type": "input_text", "text": unnamed_text},
+    ]
+    assert items[4]["created_by"] == "web@example.com"
+    assert items[5]["content"] == [{"type": "input_text", "text": bare_text}]
+    assert items[5]["created_by"] == "web@example.com"
     assert pending_inputs.snapshot_for(session_id) == []
 
 

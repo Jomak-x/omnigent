@@ -190,7 +190,6 @@ def test_stop_hook_records_only_completion_metadata(tmp_path: Path) -> None:
         "fully_idle": True,
         "failed": False,
         "cancelled": False,
-        "execution_num": 0,
         "transcript_boundary": None,
     }
     assert record_stop_event(
@@ -207,7 +206,6 @@ def test_stop_hook_records_only_completion_metadata(tmp_path: Path) -> None:
         "fully_idle": True,
         "failed": True,
         "cancelled": False,
-        "execution_num": None,
         "transcript_boundary": None,
     }
 
