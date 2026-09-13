@@ -23,6 +23,7 @@ import tempfile
 import time
 import urllib.parse
 import uuid
+import weakref
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeAlias, cast, overload
@@ -2921,6 +2922,8 @@ def create_runner_app(
     app.state.interrupted_sessions = _interrupted_sessions
     _antigravity_pending_stops: dict[str, bool] = {}
     _antigravity_stop_tasks: dict[str, asyncio.Task[Response]] = {}
+    _antigravity_delivery_tasks: weakref.WeakSet[asyncio.Task[Any]] = weakref.WeakSet()
+    app.state.antigravity_delivery_tasks = _antigravity_delivery_tasks
     # Desynced conversations; cleared when a fresh turn binds.
     _desynced_sessions: set[str] = set()
     app.state.desynced_sessions = _desynced_sessions
@@ -6988,6 +6991,9 @@ def create_runner_app(
     async def _perform_antigravity_interrupt(conv_id: str) -> Response:
         had_turn = conv_id in _active_turns
         target = _active_turns.get(conv_id)
+        delivery_started = (
+            isinstance(target, asyncio.Task) and target in _antigravity_delivery_tasks
+        )
         try:
             if isinstance(target, asyncio.Task) and not target.done():
                 if not target.cancelling():
@@ -7031,17 +7037,20 @@ def create_runner_app(
             )
         finally:
             native_completed = _antigravity_pending_stops.pop(conv_id, False)
+            cancelled_before_delivery = (
+                isinstance(target, asyncio.Task) and target.done() and not delivery_started
+            )
             if isinstance(target, asyncio.Task) and target.done():
                 if _active_turns.get(conv_id) is target:
                     _active_turns[conv_id] = None
-            if native_completed:
+            if native_completed or cancelled_before_delivery:
                 _on_proxy_stream_end(conv_id)
         assert response is not None
         if response.status_code == 204:
             _interrupted_sessions.discard(conv_id)
             if had_turn:
                 _append_cancellation_items(conv_id)
-            if not native_completed:
+            if not native_completed and not cancelled_before_delivery:
                 _on_proxy_stream_end(conv_id)
         return response
 
@@ -8092,6 +8101,9 @@ def create_runner_app(
                 await_notify=False,
             )
 
+        _delivery_task = asyncio.current_task()
+        if harness_name == "antigravity-native" and _delivery_task is not None:
+            _antigravity_delivery_tasks.add(_delivery_task)
         try:
             response = await _stream_message_to_harness(
                 harness_body,
