@@ -8101,9 +8101,6 @@ def create_runner_app(
                 await_notify=False,
             )
 
-        _delivery_task = asyncio.current_task()
-        if harness_name == "antigravity-native" and _delivery_task is not None:
-            _antigravity_delivery_tasks.add(_delivery_task)
         try:
             response = await _stream_message_to_harness(
                 harness_body,
@@ -8462,6 +8459,9 @@ def create_runner_app(
             _inject_mcp_schemas(event_body, _mcp_schemas)
             _response_id: str | None = None
             try:
+                _delivery_task = asyncio.current_task()
+                if harness_name == "antigravity-native" and _delivery_task is not None:
+                    _antigravity_delivery_tasks.add(_delivery_task)
                 async with client.stream(
                     "POST",
                     f"/v1/sessions/{conv_id}/events",

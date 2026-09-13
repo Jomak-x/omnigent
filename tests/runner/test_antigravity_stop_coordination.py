@@ -13,8 +13,9 @@ from fastapi import Response
 
 from omnigent.runner import app as runner_app
 from omnigent.runner import create_runner_app
+from omnigent.runner.mcp_manager import McpSchemasResult
 from omnigent.runtime.harnesses.process_manager import NoLiveHarnessError
-from omnigent.spec.types import AgentSpec, ExecutorSpec
+from omnigent.spec.types import AgentSpec, ExecutorSpec, MCPServerConfig
 from tests.runner.conftest import (
     _FakeProcessManager,
     _ordered_user_texts,
@@ -40,8 +41,9 @@ async def _wait_until(predicate: Any) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("confirmed", [False, True])
+@pytest.mark.parametrize("setup_phase", ["labels", "harness_startup", "mcp"])
 async def test_stop_before_native_delivery_releases_followup(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, confirmed: bool
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, confirmed: bool, setup_phase: str
 ) -> None:
     """A setup-cancelled turn cannot wait for a native status edge that cannot exist."""
     from omnigent.harnesses.antigravity_native import bridge
@@ -51,6 +53,7 @@ async def test_stop_before_native_delivery_releases_followup(
     monkeypatch.setattr("omnigent.spec.parser.discover_host_skills", lambda *_args: [])
     monkeypatch.setattr(relay_bridge, "start_tool_relay", lambda **_kwargs: Mock())
     monkeypatch.setattr(relay_bridge, "post_tools_changed", lambda *_args: None)
+    monkeypatch.setattr(runner_app, "_launch_native_terminal", AsyncMock(return_value=False))
     session_id = "antigravity-stop-before-delivery"
     harness_client = _QuiescenceHarnessClient()
     harness_client.confirmed = confirmed
@@ -58,7 +61,10 @@ async def test_stop_before_native_delivery_releases_followup(
 
     async def _resolver(agent_id: str, resolved_session_id: str | None = None) -> AgentSpec:
         del agent_id, resolved_session_id
-        return _antigravity_spec()
+        spec = _antigravity_spec()
+        if setup_phase == "mcp":
+            spec.mcp_servers = [MCPServerConfig(name="fixture", transport="http", url="http://mcp")]
+        return spec
 
     app = create_runner_app(
         process_manager=process_manager,  # type: ignore[arg-type]
@@ -67,16 +73,38 @@ async def test_stop_before_native_delivery_releases_followup(
     )
     setup_started = asyncio.Event()
     setup_calls = 0
+    harness_ready = False
 
-    async def _labels(**_kwargs: Any) -> dict[str, str]:
+    async def _pause_setup() -> None:
         nonlocal setup_calls
         setup_calls += 1
         if setup_calls == 1:
             setup_started.set()
             await asyncio.Event().wait()
+
+    async def _labels(**_kwargs: Any) -> dict[str, str]:
+        if setup_phase == "labels":
+            await _pause_setup()
         return {}
 
     monkeypatch.setattr(runner_app, "_session_labels_for_runner_spawn", _labels)
+    get_client = process_manager.get_client
+
+    async def _get_client(
+        conversation_id: str, harness: str, env: Any = None
+    ) -> _ScriptedHarnessClient:
+        nonlocal harness_ready
+        if setup_phase == "harness_startup" and harness == "antigravity-native":
+            await _pause_setup()
+        harness_ready = True
+        return await get_client(conversation_id, harness, env)
+
+    async def _schemas_for(_self: Any, _spec: AgentSpec) -> McpSchemasResult:
+        if setup_phase == "mcp" and harness_ready:
+            await _pause_setup()
+        return McpSchemasResult(schemas=[], tool_names=set(), failures={})
+
+    monkeypatch.setattr(runner_app.ProxyMcpManager, "schemas_for", _schemas_for)
 
     try:
         async with _runner_client(app) as client:
@@ -84,10 +112,12 @@ async def test_stop_before_native_delivery_releases_followup(
                 "/v1/sessions", json={"session_id": session_id, "agent_id": "antigravity"}
             )
             assert created.status_code == 201, created.text
+            monkeypatch.setattr(process_manager, "get_client", _get_client)
             first = await client.post(
                 f"/v1/sessions/{session_id}/events",
                 json={
                     "type": "message",
+                    "agent_id": "antigravity",
                     "content": [{"type": "input_text", "text": "cancel before delivery"}],
                 },
             )
@@ -106,6 +136,7 @@ async def test_stop_before_native_delivery_releases_followup(
                 f"/v1/sessions/{session_id}/events",
                 json={
                     "type": "message",
+                    "agent_id": "antigravity",
                     "content": [{"type": "input_text", "text": "follow-up"}],
                 },
             )
@@ -156,6 +187,100 @@ class _QuiescenceHarnessClient(_ScriptedHarnessClient):
             self.interrupt_posts += 1
             return Response(status_code=204 if self.confirmed else 503)
         return Response(status_code=204)
+
+
+@pytest.mark.asyncio
+async def test_stop_after_native_post_admission_waits_for_completion(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from omnigent.harnesses.antigravity_native import bridge
+    from omnigent.harnesses.claude_native import bridge as relay_bridge
+
+    monkeypatch.setattr(bridge, "_BRIDGE_ROOT", tmp_path / "agy-bridges")
+    monkeypatch.setattr("omnigent.spec.parser.discover_host_skills", lambda *_args: [])
+    monkeypatch.setattr(relay_bridge, "start_tool_relay", lambda **_kwargs: Mock())
+    monkeypatch.setattr(relay_bridge, "post_tools_changed", lambda *_args: None)
+    monkeypatch.setattr(runner_app, "_session_labels_for_runner_spawn", AsyncMock(return_value={}))
+    monkeypatch.setattr(runner_app, "_launch_native_terminal", AsyncMock(return_value=False))
+    session_id = "antigravity-stop-after-admission"
+    post_started = asyncio.Event()
+    harness_client = _QuiescenceHarnessClient()
+    stream = harness_client.stream
+
+    def _stream(method: str, url: str, *, json: dict[str, Any], timeout: Any) -> Any:
+        response = stream(method, url, json=json, timeout=timeout)
+        if len(harness_client.posted_bodies) > 1:
+            return response
+
+        class _PendingPost:
+            async def __aenter__(self) -> Any:
+                post_started.set()
+                await asyncio.Event().wait()
+                return await response.__aenter__()
+
+            async def __aexit__(self, *_args: Any) -> None:
+                return None
+
+        return _PendingPost()
+
+    monkeypatch.setattr(harness_client, "stream", _stream)
+
+    async def _resolver(agent_id: str, resolved_session_id: str | None = None) -> AgentSpec:
+        del agent_id, resolved_session_id
+        return _antigravity_spec()
+
+    app = create_runner_app(
+        process_manager=_FakeProcessManager(harness_client),  # type: ignore[arg-type]
+        spec_resolver=_resolver,
+        server_client=NullServerClient(),  # type: ignore[arg-type]
+    )
+    try:
+        async with _runner_client(app) as client:
+            created = await client.post(
+                "/v1/sessions", json={"session_id": session_id, "agent_id": "antigravity"}
+            )
+            assert created.status_code == 201, created.text
+            first = await client.post(
+                f"/v1/sessions/{session_id}/events",
+                json={
+                    "type": "message",
+                    "content": [{"type": "input_text", "text": "native turn"}],
+                },
+            )
+            assert first.status_code == 202, first.text
+            await asyncio.wait_for(post_started.wait(), timeout=3)
+            stopped = await client.post(
+                f"/v1/sessions/{session_id}/events", json={"type": "interrupt"}
+            )
+            assert stopped.status_code == 503, stopped.text
+            assert session_id in app.state.active_turns
+            assert app.state.active_turns[session_id] is None
+
+            followup = await client.post(
+                f"/v1/sessions/{session_id}/events",
+                json={
+                    "type": "message",
+                    "content": [{"type": "input_text", "text": "follow-up"}],
+                },
+            )
+            assert followup.status_code == 202, followup.text
+            assert followup.json()["status"] == "buffered"
+            assert len(harness_client.posted_bodies) == 1
+            assert app.state.session_message_buffers[session_id]
+
+            completed = await client.post(
+                f"/v1/sessions/{session_id}/events",
+                json={"type": "external_session_status", "data": {"status": "idle"}},
+            )
+            assert completed.status_code == 204, completed.text
+            await _wait_until(lambda: len(harness_client.posted_bodies) == 2)
+            await _wait_until(lambda: session_id not in app.state.active_turns)
+            assert _ordered_user_texts(harness_client.posted_bodies[1])[-1] == "follow-up"
+            assert not app.state.session_message_buffers.get(session_id)
+    finally:
+        runner_app._session_histories_ref.pop(session_id, None)
+        runner_app._session_inboxes_ref.pop(session_id, None)
+        runner_app._session_event_queues_ref.pop(session_id, None)
 
 
 @pytest.mark.asyncio
