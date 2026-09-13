@@ -66,6 +66,7 @@ describe("ProviderSetupTerminal", () => {
     expect(screen.getByText("Connecting terminal…")).toHaveClass("z-20");
     expect(screen.getByText("Running")).toBeInTheDocument();
     expect(screen.getByText(/Follow the command output/i)).toBeInTheDocument();
+    expect(screen.getByText(/a vendor redirect to localhost/i)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Cancel" })).toBeEnabled();
 
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));

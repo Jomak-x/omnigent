@@ -17,7 +17,6 @@ from omnigent.onboarding import setup_operations as operations
 from omnigent.onboarding.acp_auth import (
     acp_agents,
     acp_agents_settings,
-    parse_env_passthrough,
     shadowed_builtin_acp_rows,
     slugify,
 )
@@ -311,7 +310,36 @@ def _credential_ref(action: CredentialInput, name: str) -> tuple[str, str | None
     return f"keychain:{name}", secret
 
 
-def _save_provider_action(action: AddKey | AddGateway | AddBedrock) -> str:
+def _save_credential_settings(
+    settings: dict[str, object],
+    name: str,
+    ref: str,
+    secret: str | None,
+    previous_refs: list[object],
+) -> bool:
+    if secret is not None:
+        operations.store_staged_secret(ref, secret)
+    try:
+        operations.save_setup_settings(settings)
+    except Exception:
+        if secret is not None:
+            try:
+                operations.cleanup_unreferenced_secret(ref, name)
+            except Exception:
+                raise ValueError(
+                    "Setup was not saved; stored secret cleanup did not complete"
+                ) from None
+        raise
+    cleaned = True
+    for previous in previous_refs:
+        try:
+            operations.cleanup_unreferenced_secret(previous, name)
+        except Exception:
+            cleaned = False
+    return cleaned
+
+
+def _save_provider_action(action: AddKey | AddGateway | AddBedrock) -> tuple[str, bool]:
     config = operations.load_setup_config()
     name = action.name or action.provider if isinstance(action, AddKey) else action.name
     ref, secret = _credential_ref(action, name)
@@ -356,10 +384,15 @@ def _save_provider_action(action: AddKey | AddGateway | AddBedrock) -> str:
             _validate_url(action.base_url), ref, action.model
         )
     settings, _ = operations.provider_add_settings(config, name, entry, preserve_advanced=True)
-    if secret is not None:
-        operations.store_staged_secret(ref, secret)
-    operations.save_setup_settings(settings)
-    return name
+    old = load_providers(config).get(name)
+    cleaned = _save_credential_settings(
+        settings,
+        name,
+        ref,
+        secret,
+        [block.api_key_ref for block in old.families.values()] if old else [],
+    )
+    return name, cleaned
 
 
 def _acp_raw(config: dict[str, object]) -> tuple[dict[str, object], list[object]]:
@@ -375,7 +408,6 @@ def _change_acp(action: AddAcp | RemoveAcp | ImportAcp, config: dict[str, object
     block, raw = _acp_raw(config)
     if isinstance(action, AddAcp):
         shlex.split(action.command)
-        parse_env_passthrough(action.env_passthrough)
         item = action.model_dump(exclude={"action"})
         raw.append(item)
     elif isinstance(action, RemoveAcp):
@@ -432,8 +464,10 @@ def apply_setup_action(action: SetupAction) -> SetupActionResult:
         config = operations.load_setup_config()
         message = "Setup saved"
         if isinstance(action, (AddKey, AddGateway, AddBedrock)):
-            name = _save_provider_action(action)
+            name, cleaned = _save_provider_action(action)
             message = f"Added {name}"
+            if not cleaned:
+                message += "; stored secret cleanup did not complete"
         elif isinstance(action, Subscription):
             if action.cli != "pi":
                 from omnigent.onboarding.ambient import detect_providers
@@ -446,14 +480,22 @@ def apply_setup_action(action: SetupAction) -> SetupActionResult:
             record_subscription(action.cli)
         elif isinstance(action, AdoptDetected):
             from omnigent.onboarding.ambient import detect_providers
-            from omnigent.onboarding.detected import synthesize_detected_entries
+            from omnigent.onboarding.detected import (
+                providers_to_adopt,
+                synthesize_detected_entries,
+            )
 
             detected = [p for p in detect_providers(allow_keychain=False) if p.name == action.name]
             entry = synthesize_detected_entries(detected).get(action.name)
             if not isinstance(entry, dict):
                 raise ValueError("This connection is no longer available; detect again")
-            settings, _ = operations.provider_add_settings(config, action.name, entry)
-            settings.update(operations.detection_dismissal_settings(config, action.name, False))
+            settings = operations.detection_dismissal_settings(config, action.name, False)
+            adopted = providers_to_adopt({**config, **settings}, detected)
+            if action.name in adopted:
+                provider_settings, _ = operations.provider_add_settings(
+                    config, action.name, adopted[action.name]
+                )
+                settings.update(provider_settings)
             operations.save_setup_settings(settings)
         elif isinstance(action, SetDefault):
             block = config.get("providers", {})
@@ -473,9 +515,16 @@ def apply_setup_action(action: SetupAction) -> SetupActionResult:
             if secret is not None:
                 ref = operations.staged_secret_ref(action.harness)
             settings = operations.harness_key_settings(config, action.harness, ref)
-            if secret is not None:
-                operations.store_staged_secret(ref, secret)
-            operations.save_setup_settings(settings)
+            old = config.get(action.harness)
+            field = "github_token_ref" if action.harness == "copilot" else "api_key_ref"
+            if not _save_credential_settings(
+                settings,
+                action.harness,
+                ref,
+                secret,
+                [old.get(field)] if isinstance(old, dict) else [],
+            ):
+                message += "; stored secret cleanup did not complete"
         elif isinstance(action, RemoveHarnessKey):
             settings, unset = operations.harness_key_removal_settings(config, action.harness)
             operations.save_setup_settings(settings, unset_keys=unset)

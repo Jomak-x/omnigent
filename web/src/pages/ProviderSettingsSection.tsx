@@ -31,7 +31,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { useHosts, useInstallHarness, type Host } from "@/hooks/useHosts";
 import { isFeatureEnabled } from "@/lib/capabilities";
@@ -317,6 +316,7 @@ function ProviderHostSettings({ host }: { host: Host }) {
   const [statusErrors, setStatusErrors] = useState<Partial<Record<SetupStatusHarness, string>>>({});
   const [checkingHarness, setCheckingHarness] = useState<SetupStatusHarness | null>(null);
   const [operation, setOperation] = useState<SetupOperation | null>(null);
+  const currentOperationIdRef = useRef<string | null>(null);
   const [operationAgentId, setOperationAgentId] = useState<string | null>(null);
   const [operationRecoveryPending, setOperationRecoveryPending] = useState(
     () => readSetupOperationId(host.host_id) !== null,
@@ -355,6 +355,7 @@ function ProviderHostSettings({ host }: { host: Host }) {
       .then((recovered) => {
         if (disposed) return;
         if (recovered.state === "pending" || recovered.state === "running") {
+          currentOperationIdRef.current = recovered.operation_id;
           setOperation(recovered);
           const recoveredAgentId =
             recovered.action === "databricks-configure"
@@ -392,6 +393,7 @@ function ProviderHostSettings({ host }: { host: Host }) {
   }, [operationId]);
 
   const updateOperation = (next: SetupOperation) => {
+    if (next.operation_id !== currentOperationIdRef.current) return;
     setOperation(next);
     if (next.state === "pending" || next.state === "running") {
       rememberSetupOperation(host.host_id, next.operation_id);
@@ -471,6 +473,7 @@ function ProviderHostSettings({ host }: { host: Host }) {
     try {
       const started = await operationMutation.mutateAsync({ action, parameters });
       operationToRevealRef.current = started.operation_id;
+      currentOperationIdRef.current = started.operation_id;
       updateOperation(started);
       setOperationAgentId(originatingAgent ?? agentIdForOperation(started.action));
       if (started.action === "databricks-configure" && originatingAgent) {
@@ -545,6 +548,7 @@ function ProviderHostSettings({ host }: { host: Host }) {
       {operation?.action === "databricks-configure" && !operationAgentId && (
         <div ref={operationPanelRef} className="rounded-xl border border-border bg-card p-4">
           <ProviderSetupTerminal
+            key={operation.operation_id}
             hostId={host.host_id}
             operation={operation}
             title="Configure Databricks"
@@ -632,22 +636,9 @@ function StatusBadge({ children, good = false }: { children: React.ReactNode; go
 }
 
 function providerSurfaces(provider: SetupProvider): ProviderSurface[] {
-  const raw = provider.default_scopes?.length
-    ? provider.default_scopes
-    : provider.surfaces?.length
-      ? provider.surfaces
-      : provider.families;
-  const surfaces = raw.filter((surface): surface is ProviderSurface =>
+  return provider.default_scopes.filter((surface): surface is ProviderSurface =>
     ["anthropic", "openai", "gemini", "pi"].includes(surface),
   );
-  if (
-    !provider.default_scopes?.length &&
-    ["key", "api_key", "gateway", "local"].includes(provider.kind) &&
-    provider.families.some((family) => family === "anthropic" || family === "openai")
-  ) {
-    surfaces.push("pi");
-  }
-  return [...new Set(surfaces)];
 }
 
 const CLAUDE_KEYCHAIN_DETECTION_NOTICE =
@@ -1458,18 +1449,8 @@ const GUIDED_HARNESSES: {
   { id: "kimi", label: "Kimi", action: "kimi-login" },
 ];
 
-function operationAvailable(
-  inventory: SetupInventory,
-  host: Host,
-  action: SetupOperationAction,
-  harness?: string,
-): boolean {
-  if (inventory.supported_operations) return inventory.supported_operations.includes(action);
-  if (!harness) return true;
-  const readiness = host.configured_harnesses;
-  if (!readiness) return true;
-  const status = readiness[harness] ?? readiness[harness.replace(/-native$/, "")];
-  return status !== false;
+function operationAvailable(inventory: SetupInventory, action: SetupOperationAction): boolean {
+  return inventory.supported_operations.includes(action);
 }
 
 interface AgentOption {
@@ -1612,6 +1593,7 @@ function AgentSettings({
   const [method, setMethod] = useState<AgentMethod>(null);
   const [managedProvider, setManagedProvider] = useState<string | null>(null);
   const setupSteps = useHarnessSetupSteps();
+  const queryClient = useQueryClient();
   const install = useInstallHarness(host.host_id);
   const info = useServerInfo();
   const agent = AGENT_OPTIONS.find((item) => item.id === selectedAgentId) ?? null;
@@ -1625,8 +1607,7 @@ function AgentSettings({
   const readiness = agent
     ? (checkedStatuses[agent.harness]?.availability ?? host.configured_harnesses?.[agent.harness])
     : undefined;
-  const availableLogin =
-    !!agent?.login && operationAvailable(inventory, host, agent.login, agent.harness);
+  const availableLogin = !!agent?.login && operationAvailable(inventory, agent.login);
   const needsInstall =
     !availableLogin &&
     (readiness === false || readiness === "binary-missing" || readiness === "version-too-low");
@@ -1654,8 +1635,7 @@ function AgentSettings({
       return "Installation needed";
     if (itemReadiness === "needs-auth") return "Sign-in needed";
     if (item.login && itemReadiness === undefined) return "Sign-in status not checked";
-    if (item.login && operationAvailable(inventory, host, item.login, item.harness))
-      return "Sign-in available";
+    if (item.login && operationAvailable(inventory, item.login)) return "Sign-in available";
     return "Choose how to connect";
   };
 
@@ -1813,7 +1793,15 @@ function AgentSettings({
               variant="outline"
               loading={install.isPending}
               disabled={busy}
-              onClick={() => install.mutate(agent.harness)}
+              onClick={() =>
+                install.mutate(agent.harness, {
+                  onSuccess: () => {
+                    void queryClient.invalidateQueries({
+                      queryKey: ["provider-setup", host.host_id],
+                    });
+                  },
+                })
+              }
             >
               Install
             </Button>
@@ -1824,6 +1812,7 @@ function AgentSettings({
       {operation && operationAgentId === agent.id && (
         <div ref={operationPanelRef} className="border-b p-4">
           <ProviderSetupTerminal
+            key={operation.operation_id}
             hostId={host.host_id}
             operation={operation}
             title={
@@ -2134,7 +2123,7 @@ function AgentSettings({
                 <DatabricksGuidedRow
                   initialAgent={agent.id as "claude" | "codex" | "pi"}
                   canMutate={canMutate}
-                  available={operationAvailable(inventory, host, "databricks-configure")}
+                  available={operationAvailable(inventory, "databricks-configure")}
                   busy={busy}
                   onStart={(action, parameters) => onStart(action, parameters, agent.id)}
                 />
@@ -2178,7 +2167,7 @@ function AgentSettings({
           {agent.logout &&
             agent.id !== "claude" &&
             agent.id !== "codex" &&
-            operationAvailable(inventory, host, agent.logout, agent.harness) && (
+            operationAvailable(inventory, agent.logout) && (
               <div className="mt-4 border-t pt-3">
                 <Button
                   type="button"
@@ -2541,17 +2530,14 @@ function DatabricksGuidedRow({
   onStart: (action: SetupOperationAction, parameters?: Record<string, unknown>) => Promise<boolean>;
 }) {
   const [workspace, setWorkspace] = useState("");
-  const [agents, setAgents] = useState<string[]>([initialAgent]);
-  const toggle = (agent: string) =>
-    setAgents((items) =>
-      items.includes(agent) ? items.filter((item) => item !== agent) : [...items, agent],
-    );
+  const [scope, setScope] = useState("current");
   return (
     <form
       className="flex flex-col gap-3 p-4"
       onSubmit={(event) => {
         event.preventDefault();
-        if (!available || !workspace.trim() || agents.length === 0) return;
+        if (!available || !workspace.trim()) return;
+        const agents = scope === "all" ? ["claude", "codex", "pi"] : [initialAgent];
         void onStart("databricks-configure", { workspace_url: workspace.trim(), agents });
       }}
     >
@@ -2572,26 +2558,30 @@ function DatabricksGuidedRow({
             placeholder="https://workspace.cloud.databricks.com"
           />
         </label>
-        <div className="flex gap-3 pb-2 text-sm">
-          {["claude", "codex", "pi", "opencode"].map((agent) => (
-            <label key={agent} className="flex items-center gap-1.5 capitalize">
-              <input
-                disabled={!canMutate || !available || busy}
-                type="checkbox"
-                checked={agents.includes(agent)}
-                onChange={() => toggle(agent)}
-              />
-              {agent}
-            </label>
-          ))}
-        </div>
-        {canMutate && available && (
-          <Button
-            type="submit"
-            size="sm"
-            loading={busy}
-            disabled={!workspace.trim() || agents.length === 0}
+        <label className="flex flex-col gap-1 text-sm font-medium">
+          Configure for
+          <Select
+            value={scope}
+            onValueChange={setScope}
+            disabled={!canMutate || !available || busy}
           >
+            <SelectTrigger className="w-56">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="current">
+                {initialAgent === "claude"
+                  ? "Claude Code"
+                  : initialAgent === "codex"
+                    ? "Codex"
+                    : "Pi"}
+              </SelectItem>
+              <SelectItem value="all">Claude Code, Codex, and Pi</SelectItem>
+            </SelectContent>
+          </Select>
+        </label>
+        {canMutate && available && (
+          <Button type="submit" size="sm" loading={busy} disabled={!workspace.trim()}>
             <TerminalIcon className="size-4" /> Configure
           </Button>
         )}
@@ -2665,11 +2655,6 @@ function AcpForm({
   const [name, setName] = useState("");
   const [command, setCommand] = useState("");
   const [model, setModel] = useState("");
-  const [env, setEnv] = useState("");
-  const [mode, setMode] = useState<"server" | "client">("server");
-  const [sendModel, setSendModel] = useState(false);
-  const [mcp, setMcp] = useState(true);
-  const [system, setSystem] = useState(true);
   if (!canMutate) return null;
   return (
     <form
@@ -2683,20 +2668,11 @@ function AcpForm({
             name: name.trim(),
             command: command.trim(),
             model: model.trim() || undefined,
-            env_passthrough: env
-              .split(/[\n,]/)
-              .map((item) => item.trim())
-              .filter(Boolean),
-            session_id_mode: mode,
-            send_model: sendModel,
-            omnigent_mcp: mcp,
-            inject_system_prompt: system,
           })
         ) {
           setName("");
           setCommand("");
           setModel("");
-          setEnv("");
         }
       }}
     >
@@ -2720,54 +2696,12 @@ function AcpForm({
           rows={2}
         />
       </label>
-      <label className="flex flex-col gap-1 text-sm">
-        Environment variables to pass through
-        <Input
-          value={env}
-          onChange={(e) => setEnv(e.target.value)}
-          placeholder="NAME_ONE, NAME_TWO"
-        />
-      </label>
-      <div className="flex flex-wrap gap-4 text-sm">
-        <label className="flex items-center gap-2">
-          Session IDs
-          <Select value={mode} onValueChange={(v) => setMode(v as "server" | "client")}>
-            <SelectTrigger className="h-8 w-28">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="server">Server</SelectItem>
-              <SelectItem value="client">Client</SelectItem>
-            </SelectContent>
-          </Select>
-        </label>
-        <ToggleLabel label="Send model" value={sendModel} onChange={setSendModel} />
-        <ToggleLabel label="Omnigent MCP" value={mcp} onChange={setMcp} />
-        <ToggleLabel label="System prompt" value={system} onChange={setSystem} />
-      </div>
       <div>
         <Button type="submit" loading={busy} disabled={!name.trim() || !command.trim()}>
           <PlusIcon className="size-4" /> Add ACP agent
         </Button>
       </div>
     </form>
-  );
-}
-
-function ToggleLabel({
-  label,
-  value,
-  onChange,
-}: {
-  label: string;
-  value: boolean;
-  onChange: (value: boolean) => void;
-}) {
-  return (
-    <label className="flex items-center gap-2">
-      {label}
-      <Switch checked={value} onCheckedChange={onChange} />
-    </label>
   );
 }
 

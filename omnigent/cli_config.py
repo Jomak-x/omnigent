@@ -462,10 +462,9 @@ def _resolve_key_provider_name(  # type: ignore[explicit-any]  # config is a yam
         unique name derived from *candidate* (keep both), e.g.
         ``"anthropic-2"``.
     """
-    same_source = _existing_key_name_for_ref(config, family, api_key_ref)
-    if same_source is not None:
-        return same_source
-    return _unique_provider_name(config, candidate)
+    from omnigent.onboarding.setup_operations import resolve_key_provider_name
+
+    return resolve_key_provider_name(config, family, candidate, api_key_ref)
 
 
 def _credential_source_hint(entry: ProviderEntry, family: str) -> str | None:

@@ -1,12 +1,12 @@
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 import { ProviderSettingsSection } from "./ProviderSettingsSection";
 import { CapabilitiesProvider } from "@/lib/CapabilitiesContext";
 import { FALLBACK_SERVER_INFO } from "@/lib/capabilities";
-import { useHosts, type Host } from "@/hooks/useHosts";
+import { useHosts, useInstallHarness, type Host } from "@/hooks/useHosts";
 import {
   detectSetup,
   fetchSetupOperation,
@@ -19,7 +19,7 @@ import {
 
 vi.mock("@/hooks/useHosts", () => ({
   useHosts: vi.fn(),
-  useInstallHarness: () => ({ mutate: vi.fn(), isPending: false, isError: false }),
+  useInstallHarness: vi.fn(),
 }));
 vi.mock("@/lib/providerSetupApi", () => ({
   detectSetup: vi.fn(),
@@ -33,12 +33,24 @@ vi.mock("@/components/ProviderSetupTerminal", () => ({
     operation,
     onOperationChange,
   }: {
-    operation: { operation_id: string; state: string };
-    onOperationChange: (operation: unknown) => void;
+    operation: SetupOperation;
+    onOperationChange: (operation: SetupOperation) => void;
   }) => (
-    <div data-testid="setup-terminal">
+    <div data-testid="setup-terminal" data-operation-id={operation.operation_id}>
       <button type="button" onClick={() => onOperationChange({ ...operation })}>
         Simulate operation poll
+      </button>
+      <button type="button" onClick={() => onOperationChange({ ...operation, state: "succeeded" })}>
+        Simulate operation completion
+      </button>
+      <button
+        type="button"
+        onClick={() => {
+          deliverDelayedCancellation = () =>
+            onOperationChange({ ...operation, state: "cancelled" });
+        }}
+      >
+        Simulate delayed cancellation
       </button>
     </div>
   ),
@@ -92,6 +104,8 @@ const detectSetupMock = vi.mocked(detectSetup);
 const runSetupActionMock = vi.mocked(runSetupAction);
 const startSetupOperationMock = vi.mocked(startSetupOperation);
 const scrollIntoViewMock = vi.fn();
+const installHarnessMock = vi.fn();
+let deliverDelayedCancellation: (() => void) | undefined;
 
 const online = (host_id: string, name = host_id): Host => ({
   host_id,
@@ -119,12 +133,17 @@ function inventory(overrides: Partial<SetupInventory> = {}): SetupInventory {
     },
     dismissed_detections: [],
     effective_defaults: {},
+    supported_operations: ["claude-login", "codex-login"],
     ...overrides,
   };
 }
 
 function enabledInfo(enabled = true) {
-  return { ...FALLBACK_SERVER_INFO, features: { harness_install: enabled } };
+  return {
+    ...FALLBACK_SERVER_INFO,
+    features: { harness_install: enabled },
+    installable_harnesses: ["claude-native", "codex-native"],
+  };
 }
 
 function renderSection(featureEnabled = true) {
@@ -178,6 +197,13 @@ beforeEach(() => {
   runSetupActionMock.mockReset();
   startSetupOperationMock.mockReset();
   scrollIntoViewMock.mockReset();
+  installHarnessMock.mockReset();
+  deliverDelayedCancellation = undefined;
+  vi.mocked(useInstallHarness).mockReturnValue({
+    mutate: installHarnessMock,
+    isPending: false,
+    isError: false,
+  } as unknown as ReturnType<typeof useInstallHarness>);
   useHostsMock.mockImplementation(
     () =>
       ({
@@ -269,8 +295,8 @@ describe("ProviderSettingsSection", () => {
     await openAgent("pi");
     expect(screen.getByRole("button", { name: "Compatible gateway" })).toBeEnabled();
     fireEvent.click(screen.getByRole("button", { name: "Databricks" }));
-    expect(screen.getByRole("checkbox", { name: "pi" })).toBeChecked();
-    expect(screen.getByRole("checkbox", { name: "claude" })).not.toBeChecked();
+    expect(screen.getByLabelText("Configure for")).toHaveValue("current");
+    expect(within(screen.getByLabelText("Configure for")).getAllByRole("option")).toHaveLength(2);
     fireEvent.change(screen.getByLabelText("Workspace URL"), {
       target: { value: "https://workspace.example.com" },
     });
@@ -360,6 +386,31 @@ describe("ProviderSettingsSection", () => {
     expect(screen.getByTestId("agent-provider-row-codex-subscription")).toHaveTextContent(
       "Used for new sessions",
     );
+  });
+
+  it("does not infer Pi compatibility when the host reports no default scopes", async () => {
+    hosts = [online("mac")];
+    inventories.set(
+      "mac",
+      inventory({
+        providers: [
+          {
+            name: "unavailable-key",
+            kind: "key",
+            families: ["openai"],
+            defaults: [],
+            default_scopes: [],
+            credential_sources: { openai: "stored" },
+            models: {},
+            base_urls: {},
+          },
+        ],
+      }),
+    );
+    renderSection();
+    await openAgent("pi");
+    expect(screen.queryByText("unavailable-key")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Use for new Pi sessions" })).toBeNull();
   });
 
   it("uses the Pi scope for its default action while advanced keeps its scope picker", async () => {
@@ -1010,6 +1061,95 @@ describe("ProviderSettingsSection", () => {
       expect(startSetupOperationMock).toHaveBeenCalledWith("mac", "databricks-configure", {
         workspace_url: "https://workspace.example.com",
         agents: ["codex"],
+      }),
+    );
+  });
+
+  it("offers Databricks setup for the current harness or all standard harnesses", async () => {
+    hosts = [online("mac")];
+    inventories.set("mac", inventory({ supported_operations: ["databricks-configure"] }));
+    renderSection();
+
+    await openAgent("claude");
+    fireEvent.click(screen.getByRole("button", { name: "Databricks" }));
+    fireEvent.change(screen.getByLabelText("Configure for"), { target: { value: "all" } });
+    fireEvent.change(screen.getByLabelText("Workspace URL"), {
+      target: { value: "https://workspace.example.com" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^configure$/i }));
+
+    await waitFor(() =>
+      expect(startSetupOperationMock).toHaveBeenCalledWith("mac", "databricks-configure", {
+        workspace_url: "https://workspace.example.com",
+        agents: ["claude", "codex", "pi"],
+      }),
+    );
+  });
+
+  it("keeps a new operation and its recovery ID when an old cancellation arrives", async () => {
+    hosts = [online("mac")];
+    inventories.set("mac", inventory({ supported_operations: ["codex-login"] }));
+    renderSection();
+    await openAgent("codex");
+    fireEvent.click(screen.getByRole("button", { name: "ChatGPT subscription" }));
+    await screen.findByTestId("setup-terminal");
+    fireEvent.click(screen.getByRole("button", { name: "Simulate delayed cancellation" }));
+    fireEvent.click(screen.getByRole("button", { name: "Simulate operation completion" }));
+    startSetupOperationMock.mockResolvedValue({
+      operation_id: "op-2",
+      state: "running",
+      action: "codex-login",
+      exit_code: null,
+      error: null,
+    });
+    fireEvent.click(screen.getByRole("button", { name: "ChatGPT subscription" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("setup-terminal")).toHaveAttribute("data-operation-id", "op-2"),
+    );
+
+    act(() => deliverDelayedCancellation?.());
+
+    expect(screen.getByTestId("setup-terminal")).toHaveAttribute("data-operation-id", "op-2");
+    expect(sessionStorage.getItem("omnigent:provider-setup-operation:mac")).toBe("op-2");
+    expect(screen.getByRole("button", { name: "ChatGPT subscription" })).toBeDisabled();
+  });
+
+  it("refreshes the selected host's sign-in commands after installing a harness", async () => {
+    hosts = [{ ...online("mac"), configured_harnesses: { "codex-native": "binary-missing" } }];
+    inventories.set("mac", inventory({ supported_operations: [] }));
+    installHarnessMock.mockImplementation((_harness, options) => {
+      inventories.set("mac", inventory({ supported_operations: ["codex-login"] }));
+      options.onSuccess();
+    });
+    renderSection();
+    await openAgent("codex");
+    expect(screen.getByRole("button", { name: "ChatGPT subscription" })).toBeDisabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Install" }));
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "ChatGPT subscription" })).toBeEnabled(),
+    );
+    expect(fetchInventoryMock.mock.calls.map(([hostId]) => hostId)).toEqual(["mac", "mac"]);
+  });
+
+  it("sends only standard setup fields when creating a custom ACP agent", async () => {
+    hosts = [online("mac")];
+    renderSection();
+    await openAdvanced("Custom ACP agents");
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Example" } });
+    fireEvent.change(screen.getByLabelText("Launch command"), {
+      target: { value: "example --acp" },
+    });
+    fireEvent.change(screen.getByLabelText("Model"), { target: { value: "test-model" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add ACP agent" }));
+
+    await waitFor(() =>
+      expect(runSetupActionMock).toHaveBeenCalledWith("mac", {
+        action: "add_acp",
+        name: "Example",
+        command: "example --acp",
+        model: "test-model",
       }),
     );
   });

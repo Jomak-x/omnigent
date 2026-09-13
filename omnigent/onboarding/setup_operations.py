@@ -301,8 +301,7 @@ def acp_entries_settings(
     if not isinstance(raw, list):
         raise ValueError("Existing ACP agents must be a list")
     current = iter(acp_agents(config))
-    desired = {entry.slug for entry in entries}
-    known = set()
+    remaining = list(entries)
     result = []
     for row in raw:
         if (
@@ -313,12 +312,15 @@ def acp_entries_settings(
             and row["command"].strip()
         ):
             parsed = next(current)
-            known.add(parsed.slug)
-            if parsed.slug in desired:
+            match = next(
+                (i for i, entry in enumerate(remaining) if entry.slug == parsed.slug), None
+            )
+            if match is not None:
                 result.append(row)
+                remaining.pop(match)
         else:
             result.append(row)
-    added = acp_agents_settings([entry for entry in entries if entry.slug not in known])["acp"]
+    added = acp_agents_settings(remaining)["acp"]
     if isinstance(added, dict):
         result.extend(added["agents"])
     block["agents"] = result
@@ -327,16 +329,18 @@ def acp_entries_settings(
 
 def cleanup_removed_harness_secret(config: dict[str, object], harness: str) -> None:
     """Delete only our unreferenced slot after the config removal succeeds."""
-    import re
-
-    from omnigent.onboarding.secrets import delete_secret
-
     old = config.get(harness)
     if not isinstance(old, dict):
         return
     ref = old.get("github_token_ref" if harness == "copilot" else "api_key_ref")
+    cleanup_unreferenced_secret(ref, harness)
+
+
+def cleanup_unreferenced_secret(ref: object, name: str) -> None:
+    from omnigent.onboarding.secrets import delete_secret
+
     if not isinstance(ref, str) or not re.fullmatch(
-        rf"keychain:{harness}(?:-[a-f0-9]{{32}})?", ref
+        rf"keychain:{re.escape(name)}(?:-[a-f0-9]{{32}})?", ref
     ):
         return
     remaining = load_setup_config()

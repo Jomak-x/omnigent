@@ -26,7 +26,12 @@ from uuid import uuid4
 
 from fastapi import WebSocketDisconnect
 
+from omnigent._platform import resolve_cli_binary
 from omnigent.inner.terminal import TerminalInstance
+from omnigent.onboarding.databricks_config import (
+    DATABRICKS_EXTRA_INSTALL_HINT,
+    databricks_sdk_installed,
+)
 from omnigent.onboarding.provider_config import (
     ANTHROPIC_FAMILY,
     GEMINI_FAMILY,
@@ -42,7 +47,12 @@ _MAX_PENDING_INPUT_EVENTS = 16
 _MAX_TERMINAL_COLUMNS = 500
 _MAX_TERMINAL_ROWS = 300
 _COMPLETED_OPERATION_RETENTION = 128
-_DATABRICKS_AGENTS = frozenset({"claude", "codex", "opencode", "pi"})
+_DATABRICKS_AGENT_CHOICES = (
+    ("claude",),
+    ("codex",),
+    ("pi",),
+    ("claude", "codex", "pi"),
+)
 
 
 class SetupOperationAction(StrEnum):
@@ -326,14 +336,23 @@ class SetupOperationManager:
         supported = [
             action
             for action, (binary, _args, _label) in _FIXED_COMMANDS.items()
-            if self._resolve_executable(binary) is not None
+            if self._action_executable(action, binary) is not None
         ]
-        if self._resolve_executable("databricks") is not None and (
-            self._resolve_executable("uvx") is not None
-            or self._resolve_executable("ucode") is not None
+        if (
+            self._resolve_executable("databricks") is not None
+            and (
+                self._resolve_executable("uvx") is not None
+                or self._resolve_executable("ucode") is not None
+            )
+            and databricks_sdk_installed()
         ):
             supported.append(SetupOperationAction.DATABRICKS_CONFIGURE)
         return tuple(supported)
+
+    def _action_executable(self, action: SetupOperationAction, binary: str) -> str | None:
+        if action == SetupOperationAction.ANTIGRAVITY_LOGIN:
+            return resolve_cli_binary(binary, which=self._resolve_executable)
+        return self._resolve_executable(binary)
 
     async def start(
         self, request: SetupOperationRequest | Mapping[str, object]
@@ -485,6 +504,12 @@ class SetupOperationManager:
                 "unavailable", "tmux is required for guided setup on this host."
             )
         if action == SetupOperationAction.DATABRICKS_CONFIGURE:
+            if not databricks_sdk_installed():
+                raise SetupOperationError(
+                    "unavailable",
+                    "Databricks setup requires the databricks extra on this host. "
+                    f"Install it with: {DATABRICKS_EXTRA_INSTALL_HINT}",
+                )
             if self._resolve_executable("databricks") is None:
                 raise SetupOperationError(
                     "unavailable", "Databricks CLI is not installed on this host."
@@ -510,7 +535,7 @@ class SetupOperationManager:
                 "Databricks",
             )
         binary, args, label = _FIXED_COMMANDS[action]
-        executable = self._resolve_executable(binary)
+        executable = self._action_executable(action, binary)
         if executable is None:
             raise SetupOperationError("unavailable", f"{label} is not installed on this host.")
         return _CommandPlan(executable, args, label)
@@ -746,13 +771,10 @@ def _validated_parameters(request: SetupOperationRequest) -> dict[str, object]:
     if (
         not isinstance(raw_agents, Sequence)
         or isinstance(raw_agents, (str, bytes))
-        or not raw_agents
-        or any(
-            not isinstance(agent, str) or agent not in _DATABRICKS_AGENTS for agent in raw_agents
-        )
+        or tuple(raw_agents) not in _DATABRICKS_AGENT_CHOICES
     ):
         raise SetupOperationError("invalid_request", "Unsupported Databricks setup agent.")
-    agents = tuple(dict.fromkeys(agent for agent in raw_agents if isinstance(agent, str)))
+    agents = tuple(raw_agents)
     return {"workspace_url": workspace_url, "agents": agents}
 
 
@@ -790,7 +812,11 @@ def _verify_action(
         from omnigent.onboarding.ucode_setup import ucode_workspace_exists
 
         return ucode_workspace_exists(str(parameters["workspace_url"]))
-    from omnigent.onboarding.harness_install import CURSOR_KEY, harness_cli_logged_in
+    from omnigent.onboarding.harness_install import (
+        CURSOR_KEY,
+        harness_cli_logged_in,
+        invalidate_harness_login_cache,
+    )
 
     login_key = {
         SetupOperationAction.CLAUDE_LOGIN: ANTHROPIC_FAMILY,
@@ -804,6 +830,7 @@ def _verify_action(
         SetupOperationAction.CURSOR_LOGOUT: CURSOR_KEY,
     }.get(action)
     if logout_key is not None:
+        invalidate_harness_login_cache(logout_key)
         return not harness_cli_logged_in(logout_key)
     if action == SetupOperationAction.OPENCODE_LOGIN:
         from omnigent.onboarding.opencode_auth import opencode_auth_summary
@@ -899,8 +926,8 @@ async def _join_tasks(
 
 def _run_databricks(workspace_url: str, agents_csv: str) -> int:
     """Run fixed Databricks login and ucode configuration, then verify state."""
-    agents = tuple(agent for agent in agents_csv.split(",") if agent)
-    if not agents or any(agent not in _DATABRICKS_AGENTS for agent in agents):
+    agents = tuple(agents_csv.split(","))
+    if agents not in _DATABRICKS_AGENT_CHOICES:
         return 2
     try:
         from omnigent.onboarding.setup import login_databricks_workspace

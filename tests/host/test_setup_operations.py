@@ -7,6 +7,7 @@ import json
 import threading
 from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -212,14 +213,23 @@ async def test_fixed_vendor_action_maps_to_host_owned_argv(
 
 
 @pytest.mark.asyncio
-async def test_databricks_parameters_are_normalized_and_closed_over() -> None:
+@pytest.mark.parametrize(
+    ("agents", "expected_agents"),
+    [(["codex"], "codex"), (["claude", "codex", "pi"], "claude,codex,pi")],
+)
+async def test_databricks_parameters_are_normalized_and_closed_over(
+    monkeypatch: pytest.MonkeyPatch,
+    agents: list[str],
+    expected_agents: str,
+) -> None:
+    monkeypatch.setattr(operations, "databricks_sdk_installed", lambda: True)
     harness = _Harness(verifier=lambda _action, _parameters: None)
     snapshot = await harness.manager.start(
         {
             "action": "databricks-configure",
             "parameters": {
                 "workspace_url": "https://workspace.cloud.databricks.com/browse?o=123",
-                "agents": ["codex", "codex"],
+                "agents": agents,
             },
         }
     )
@@ -228,7 +238,7 @@ async def test_databricks_parameters_are_normalized_and_closed_over() -> None:
     assert plan.executable
     assert plan.args[-2:] == (
         "https://workspace.cloud.databricks.com",
-        "codex",
+        expected_agents,
     )
     assert "browse" not in repr(snapshot.as_dict())
 
@@ -257,6 +267,26 @@ async def test_databricks_parameters_are_normalized_and_closed_over() -> None:
             "action": "databricks-configure",
             "parameters": {"workspace_url": "https://example.com", "agents": ["shell"]},
         },
+        {
+            "action": "databricks-configure",
+            "parameters": {"workspace_url": "https://example.com", "agents": ["opencode"]},
+        },
+        {
+            "action": "databricks-configure",
+            "parameters": {"workspace_url": "https://example.com", "agents": ["claude", "pi"]},
+        },
+        {
+            "action": "databricks-configure",
+            "parameters": {"workspace_url": "https://example.com", "agents": ["codex", "codex"]},
+        },
+        {
+            "action": "databricks-configure",
+            "parameters": {"workspace_url": "https://example.com", "agents": [[]]},
+        },
+        {
+            "action": "databricks-configure",
+            "parameters": {"workspace_url": "https://example.com", "agents": [{}]},
+        },
     ],
 )
 async def test_request_rejects_arbitrary_execution_inputs(
@@ -284,7 +314,13 @@ async def test_missing_prerequisite_is_explicit_and_does_not_allocate_terminal()
     assert harness.terminals == []
 
 
-def test_supported_actions_only_reports_available_fixed_workflows() -> None:
+def test_supported_actions_only_reports_available_fixed_workflows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import omnigent._platform as platform
+
+    monkeypatch.setattr(operations, "databricks_sdk_installed", lambda: True)
+    monkeypatch.setattr(platform, "_cli_fallback_dirs", lambda: ())
     available = {"tmux", "codex", "databricks", "ucode"}
     manager = SetupOperationManager(
         terminal_factory=lambda _plan, _operation_id: _FakeTerminal(_plan),
@@ -298,6 +334,95 @@ def test_supported_actions_only_reports_available_fixed_workflows() -> None:
 
     manager._resolve_executable = lambda name: "/fixture/bin/codex" if name == "codex" else None
     assert manager.supported_actions() == ()
+
+
+@pytest.mark.asyncio
+async def test_databricks_extra_is_required_before_terminal_launch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import omnigent._platform as platform
+
+    available = {"tmux", "databricks", "uvx"}
+    harness = _Harness()
+    harness.manager._resolve_executable = lambda name: (
+        f"/fixture/bin/{name}" if name in available else None
+    )
+    monkeypatch.setattr(operations, "databricks_sdk_installed", lambda: False)
+    monkeypatch.setattr(platform, "_cli_fallback_dirs", lambda: ())
+
+    assert SetupOperationAction.DATABRICKS_CONFIGURE not in harness.manager.supported_actions()
+    with pytest.raises(SetupOperationError) as exc_info:
+        await harness.manager.start(
+            {
+                "action": "databricks-configure",
+                "parameters": {
+                    "workspace_url": "https://workspace.example.com",
+                    "agents": ["codex"],
+                },
+            }
+        )
+
+    assert exc_info.value.code == "unavailable"
+    assert "databricks extra" in exc_info.value.message
+    assert harness.terminals == []
+
+
+@pytest.mark.asyncio
+async def test_antigravity_login_resolves_supported_fallback_binary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import omnigent._platform as platform
+
+    binary = tmp_path / "agy"
+    binary.write_text("fixture executable", encoding="utf-8")
+    binary.chmod(0o755)
+    monkeypatch.setattr(platform, "_cli_fallback_dirs", lambda: (tmp_path,))
+    terminals: list[_FakeTerminal] = []
+
+    def terminal_factory(plan: operations._CommandPlan, _operation_id: str) -> _FakeTerminal:
+        terminal = _FakeTerminal(plan)
+        terminals.append(terminal)
+        return terminal
+
+    manager = SetupOperationManager(
+        terminal_factory=terminal_factory,
+        executable_resolver=lambda name: "/fixture/bin/tmux" if name == "tmux" else None,
+    )
+
+    assert SetupOperationAction.ANTIGRAVITY_LOGIN in manager.supported_actions()
+    snapshot = await manager.start({"action": "antigravity-login"})
+    assert terminals[0].plan.executable == str(binary)
+    await manager.cancel(snapshot.operation_id)
+
+
+@pytest.mark.asyncio
+async def test_guided_cursor_logout_rechecks_cli_after_cached_login(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import omnigent.onboarding.harness_install as harness_install
+
+    logged_in = True
+    status_calls = 0
+
+    def fake_status(*_args: object, **_kwargs: object) -> SimpleNamespace:
+        nonlocal status_calls
+        status_calls += 1
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({"isAuthenticated": logged_in}),
+        )
+
+    monkeypatch.setattr(harness_install, "_LOGIN_PROBE_CACHE", {})
+    monkeypatch.setattr(harness_install.shutil, "which", lambda _name: "/fixture/bin/cursor-agent")
+    monkeypatch.setattr(harness_install.subprocess, "run", fake_status)
+
+    assert harness_install.harness_cli_logged_in(harness_install.CURSOR_KEY)
+    logged_in = False
+    harness = _Harness(verifier=operations._verify_action)
+    snapshot = await harness.manager.start({"action": "cursor-logout"})
+    await harness.terminals[0].complete(0)
+    await _wait_for_state(harness.manager, snapshot.operation_id, SetupOperationState.SUCCEEDED)
+    assert status_calls == 2
 
 
 def test_setup_terminal_does_not_load_user_shell_startup(
@@ -325,9 +450,8 @@ def test_setup_terminal_does_not_load_user_shell_startup(
     [
         (("claude",), "anthropic"),
         (("codex",), "openai"),
-        (("opencode",), "openai"),
         (("pi",), "pi"),
-        (("claude", "codex"), None),
+        (("claude", "codex", "pi"), None),
     ],
 )
 def test_databricks_persistence_uses_selected_surface(

@@ -11,10 +11,6 @@ export interface SetupProvider {
   defaults: string[];
   default_scopes: string[];
   credential_sources: Record<string, string>;
-  /** Newer hosts provide the scopes this provider can become the default for. */
-  surfaces?: string[];
-  /** Newer hosts may distinguish a direct default from an inherited fallback. */
-  effective_defaults?: string[];
   models: Record<string, string>;
   base_urls: Record<string, string>;
   wire_api?: string | null;
@@ -68,7 +64,7 @@ export interface SetupInventory {
   effective_defaults: Record<string, string | null>;
   pi_default_requires_detection?: boolean;
   /** Guided commands whose executable and prerequisites are present on this host. */
-  supported_operations?: SetupOperationAction[];
+  supported_operations: SetupOperationAction[];
 }
 
 export interface DetectedConnection {
@@ -155,11 +151,6 @@ export type SetupAction =
       name: string;
       command: string;
       model?: string;
-      env_passthrough: string[];
-      session_id_mode: "server" | "client";
-      send_model: boolean;
-      omnigent_mcp: boolean;
-      inject_system_prompt: boolean;
     }
   | { action: "remove_acp"; slug: string }
   | {

@@ -286,6 +286,13 @@ export function ProviderSetupTerminal({
         aria-live="polite"
       >
         {stateMessage(operation)}
+        {active && (
+          <p className="mt-1">
+            If this is a remote computer, a vendor redirect to localhost reaches the computer
+            running your browser, not the selected host. Use the vendor’s device-code or remote
+            sign-in option when available, or complete sign-in in a browser on the selected host.
+          </p>
+        )}
         {operation.error && <p className="mt-1 text-destructive">{operation.error}</p>}
         {requestError && <p className="mt-1 text-destructive">{requestError}</p>}
       </div>

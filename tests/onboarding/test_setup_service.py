@@ -280,22 +280,48 @@ def test_standalone_credential_rotation_is_not_a_setup_action():
 
 
 def test_acp_edits_preserve_unknown_existing_fields():
-    save_global_config(
-        {"acp": {"future": True, "agents": [{"name": "Old", "command": "old --acp", "future": 3}]}}
-    )
+    existing = {
+        "name": "Old",
+        "command": "old --acp",
+        "future": 3,
+        "env_passthrough": ["FIXTURE_TOKEN"],
+        "session_id_mode": "client",
+        "send_model": True,
+        "omnigent_mcp": False,
+        "inject_system_prompt": False,
+    }
+    save_global_config({"acp": {"future": True, "agents": [existing]}})
     apply(
         action="add_acp",
         name="New",
         command="new --acp",
-        env_passthrough=["FIXTURE_TOKEN"],
-        omnigent_mcp=False,
+        model="fixture-model",
     )
-    assert load_global_config()["acp"]["agents"][0]["future"] == 3
+    assert load_global_config()["acp"]["agents"] == [
+        existing,
+        {"name": "New", "command": "new --acp", "model": "fixture-model"},
+    ]
     apply(action="remove_acp", slug="new")
     assert load_global_config()["acp"] == {
         "future": True,
-        "agents": [{"name": "Old", "command": "old --acp", "future": 3}],
+        "agents": [existing],
     }
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("env_passthrough", ["FIXTURE_TOKEN"]),
+        ("session_id_mode", "client"),
+        ("send_model", True),
+        ("omnigent_mcp", False),
+        ("inject_system_prompt", False),
+    ],
+)
+def test_acp_creation_rejects_nonstandard_options(field: str, value: object):
+    with pytest.raises(ValueError):
+        apply(action="add_acp", name="New", command="new --acp", **{field: value})
+    assert "acp" not in load_global_config()
 
 
 def test_detect_adopt_remove_dismiss_and_re_adopt(monkeypatch: pytest.MonkeyPatch):
@@ -530,3 +556,113 @@ def test_existing_unicode_provider_identifier_can_be_managed():
     assert service.get_setup_inventory().effective_defaults["openai"] == name
     apply(action="remove_provider", name=name)
     assert service.get_setup_inventory().providers == []
+
+
+def test_readoption_keeps_configured_entry_authoritative(monkeypatch: pytest.MonkeyPatch):
+    apply(action="add_key", provider="openai", secret="fixture-key", model="custom-model")
+    before = load_global_config()
+    before["providers"]["openai"]["openai"]["context_window"] = 200000
+    before["providers"]["openai"]["future_setting"] = {"keep": True}
+    save_global_config(before)
+    monkeypatch.setenv("OPENAI_API_KEY", "different-fixture-key")
+    monkeypatch.setattr(
+        ambient,
+        "detect_providers",
+        lambda **_: [ambient.DetectedProvider("openai", "key", "openai", "$OPENAI_API_KEY")],
+    )
+    apply(action="adopt_detected", name="openai")
+    assert load_global_config()["providers"] == before["providers"]
+
+
+def test_adoption_deduplicates_subscription_identity(monkeypatch: pytest.MonkeyPatch):
+    save_global_config(
+        {"providers": {"my-codex": {"kind": "subscription", "cli": "codex", "default": "openai"}}}
+    )
+    before = load_global_config()["providers"]
+    monkeypatch.setattr(
+        ambient,
+        "detect_providers",
+        lambda **_: [ambient.DetectedProvider("codex", "subscription", "openai", "fixture")],
+    )
+    apply(action="adopt_detected", name="codex")
+    assert load_global_config()["providers"] == before
+
+
+def test_cli_replaces_ui_staged_key_in_place(monkeypatch: pytest.MonkeyPatch):
+    from omnigent import cli_config
+    from omnigent.onboarding import interactive
+    from omnigent.onboarding.provider_config import get_default_provider
+
+    apply(action="add_key", provider="openai", secret="ui-fixture", model="ui-model")
+    monkeypatch.setattr(interactive, "select", lambda *_a, **_kw: 0)
+    answers = iter(["cli-fixture", "cli-model"])
+    monkeypatch.setattr(interactive, "prompt_text", lambda *_a, **_kw: next(answers))
+    cli_config._configure_harness_add("openai")
+    config = load_global_config()
+    assert set(config["providers"]) == {"openai"}
+    entry = config["providers"]["openai"]
+    assert entry["openai"]["api_key_ref"] == "keychain:openai"
+    assert entry["openai"]["models"]["default"] == "cli-model"
+    assert secrets.load_secret("openai") == "cli-fixture"
+    assert get_default_provider(config, "openai").name == "openai"
+
+
+@pytest.mark.parametrize("harness", [None, "cursor", "antigravity", "copilot"])
+def test_failed_save_cleans_fresh_secret(harness: str | None, monkeypatch: pytest.MonkeyPatch):
+    def save(secret: str):
+        if harness:
+            return apply(action="set_harness_key", harness=harness, secret=secret)
+        return gateway(secret=secret)
+
+    save("original-fixture")
+    before = load_global_config()
+    original = secrets._read_secrets_file()
+    monkeypatch.setattr(
+        service.operations,
+        "save_setup_settings",
+        lambda *_a, **_kw: (_ for _ in ()).throw(OSError("fixture persistence failure")),
+    )
+    with pytest.raises(OSError, match="fixture persistence failure"):
+        save("replacement-fixture")
+    assert load_global_config() == before
+    assert secrets._read_secrets_file() == original
+
+
+@pytest.mark.parametrize("harness", [None, "cursor", "antigravity", "copilot"])
+def test_replacement_cleans_owned_superseded_secret(harness: str | None):
+    def save(secret: str):
+        if harness:
+            return apply(action="set_harness_key", harness=harness, secret=secret)
+        return gateway(secret=secret)
+
+    save("original-fixture")
+    old_slots = set(secrets._read_secrets_file())
+    save("replacement-fixture")
+    remaining = secrets._read_secrets_file()
+    assert not old_slots.intersection(remaining)
+    assert list(remaining.values()) == ["replacement-fixture"]
+
+
+@pytest.mark.parametrize("shared", [False, True])
+def test_harness_replacement_preserves_foreign_or_shared_secret(shared: bool):
+    ref = "keychain:cursor" if shared else "keychain:unrelated-slot"
+    secrets.store_secret(ref.removeprefix("keychain:"), "original-fixture")
+    config: dict[str, object] = {"cursor": {"api_key_ref": ref}}
+    if shared:
+        config["unrelated"] = {"nested": [ref]}
+    save_global_config(config)
+    apply(action="set_harness_key", harness="cursor", secret="replacement-fixture")
+    assert secrets.load_secret(ref.removeprefix("keychain:")) == "original-fixture"
+
+
+def test_cleanup_failure_reports_successful_save(monkeypatch: pytest.MonkeyPatch):
+    gateway()
+    monkeypatch.setattr(
+        secrets,
+        "delete_secret",
+        lambda *_: (_ for _ in ()).throw(OSError("fixture cleanup failure")),
+    )
+    result = gateway(secret="replacement-fixture")
+    assert "cleanup did not complete" in result.message
+    ref = load_global_config()["providers"]["gateway"]["openai"]["api_key_ref"]
+    assert secrets.load_secret(ref.removeprefix("keychain:")) == "replacement-fixture"

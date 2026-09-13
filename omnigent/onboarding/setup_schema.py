@@ -119,11 +119,6 @@ class AddAcp(SetupModel):
     name: Name
     command: str = Field(min_length=1, max_length=4096)
     model: ModelId | None = None
-    env_passthrough: list[str] = Field(default_factory=list, max_length=100)
-    session_id_mode: Literal["server", "client"] = "server"
-    send_model: bool = False
-    omnigent_mcp: bool = True
-    inject_system_prompt: bool = True
 
 
 class RemoveAcp(SetupModel):
