@@ -89,6 +89,27 @@ async def test_setup_failures_do_not_echo_raw_exception(monkeypatch, caplog):
     assert "fixture-sensitive-value" not in caplog.text
 
 
+async def test_failed_save_and_secret_cleanup_returns_safe_host_error(monkeypatch, caplog):
+    from omnigent.onboarding.setup_service import SetupPersistenceError
+
+    monkeypatch.setattr(
+        "omnigent.onboarding.setup_service.apply_setup_action",
+        Mock(side_effect=SetupPersistenceError()),
+    )
+    result = await HostSetupDispatcher().request(
+        HostSetupRequestFrame(
+            "request",
+            SetupMethod.ACTION,
+            {"action": "set_harness_key", "harness": "cursor", "secret": "fixture-secret"},
+        ),
+        AsyncMock(),
+    )
+    assert result.error_status == 502
+    assert result.error == "Setup was not saved; stored secret cleanup did not complete"
+    assert "fixture-secret" not in repr(result)
+    assert "fixture-secret" not in caplog.text
+
+
 async def test_inventory_includes_only_available_guided_actions(monkeypatch):
     from omnigent.host.setup_operations import SetupOperationAction
     from omnigent.onboarding.setup_schema import SetupInventory

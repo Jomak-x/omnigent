@@ -346,6 +346,115 @@ def test_configure_models_readd_key_does_not_drop_default(isolated_config) -> No
     assert secrets.load_secret("anthropic") == "sk-ant-new-key"
 
 
+@pytest.mark.parametrize("shared", [False, True])
+def test_cli_replaces_ui_staged_key_and_cleans_only_unreferenced_secret(
+    isolated_config, shared: bool
+) -> None:
+    old_slot = "openai-" + "a" * 32
+    old_ref = f"keychain:{old_slot}"
+    config = {
+        "providers": {
+            "openai": {
+                "kind": "key",
+                "openai": {
+                    "base_url": "https://api.openai.com/v1",
+                    "api_key_ref": old_ref,
+                    "models": {"default": "gpt-5.5"},
+                },
+            }
+        }
+    }
+    if shared:
+        config["custom"] = {"credential_ref": old_ref}
+    (isolated_config / "config.yaml").write_text(yaml.safe_dump(config))
+    secrets.store_secret(old_slot, "old-secret")
+
+    stdin = "\n".join(["2", "2", "1", "new-secret", "", "q", "q"]) + "\n"
+    result = CliRunner().invoke(cli, ["setup", "--no-internal-beta"], input=stdin)
+
+    assert result.exit_code == 0, result.output
+    providers = _config_yaml(isolated_config)["providers"]
+    assert list(providers) == ["openai"]
+    assert providers["openai"]["openai"]["api_key_ref"] == "keychain:openai"
+    assert secrets.load_secret("openai") == "new-secret"
+    assert secrets.load_secret(old_slot) == ("old-secret" if shared else None)
+
+
+def test_cli_keeps_previous_secret_when_config_save_fails(isolated_config, monkeypatch) -> None:
+    old_slot = "openai-" + "a" * 32
+    old_ref = f"keychain:{old_slot}"
+    config = {
+        "providers": {
+            "openai": {
+                "kind": "key",
+                "openai": {
+                    "base_url": "https://api.openai.com/v1",
+                    "api_key_ref": old_ref,
+                },
+            }
+        }
+    }
+    (isolated_config / "config.yaml").write_text(yaml.safe_dump(config))
+    secrets.store_secret(old_slot, "old-secret")
+
+    def fail_save(_settings):
+        raise OSError("fixture save failure")
+
+    monkeypatch.setattr("omnigent.cli_config._save_global_config", fail_save)
+    stdin = "\n".join(["2", "2", "1", "new-secret", "", "q", "q"]) + "\n"
+    result = CliRunner().invoke(cli, ["setup", "--no-internal-beta"], input=stdin)
+
+    assert result.exit_code != 0
+    assert _config_yaml(isolated_config) == config
+    assert secrets.load_secret(old_slot) == "old-secret"
+
+
+def test_cli_reports_cleanup_failure_after_replacement_saved(isolated_config, monkeypatch) -> None:
+    from omnigent.onboarding import interactive
+
+    old_slot = "openai-" + "a" * 32
+    old_ref = f"keychain:{old_slot}"
+    config = {
+        "providers": {
+            "openai": {
+                "kind": "key",
+                "openai": {
+                    "base_url": "https://api.openai.com/v1",
+                    "api_key_ref": old_ref,
+                },
+            }
+        }
+    }
+    (isolated_config / "config.yaml").write_text(yaml.safe_dump(config))
+    secrets.store_secret(old_slot, "old-secret")
+    original_delete = secrets.delete_secret
+
+    def fail_old_slot(name: str) -> None:
+        if name == old_slot:
+            raise OSError("fixture cleanup failure")
+        original_delete(name)
+
+    monkeypatch.setattr(secrets, "delete_secret", fail_old_slot)
+    original_select = interactive.select
+    statuses: list[str] = []
+
+    def capture_status(*args, **kwargs):
+        if kwargs.get("status"):
+            statuses.append(kwargs["status"])
+        return original_select(*args, **kwargs)
+
+    monkeypatch.setattr(interactive, "select", capture_status)
+    stdin = "\n".join(["2", "2", "1", "new-secret", "", "q", "q"]) + "\n"
+    result = CliRunner().invoke(cli, ["setup", "--no-internal-beta"], input=stdin)
+
+    assert result.exit_code == 0, result.output
+    assert any("stored secret cleanup did not complete" in status for status in statuses)
+    saved_ref = _config_yaml(isolated_config)["providers"]["openai"]["openai"]["api_key_ref"]
+    assert saved_ref == "keychain:openai"
+    assert secrets.load_secret("openai") == "new-secret"
+    assert secrets.load_secret(old_slot) == "old-secret"
+
+
 def test_configure_models_add_gateway_openrouter_chat_wire(isolated_config) -> None:
     """Adding an OpenRouter gateway records the openai family with `wire_api: chat`.
 

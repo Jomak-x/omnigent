@@ -297,6 +297,9 @@ function ProviderHostSettings({ host }: { host: Host }) {
   const statusMutation = useMutation({
     mutationFn: (harness: SetupStatusHarness) => detectSetup(host.host_id, { harness }),
   });
+  const piDefaultMutation = useMutation({
+    mutationFn: () => detectSetup(host.host_id, { pi_default: true }),
+  });
   const operationMutation = useMutation({
     mutationFn: ({
       action,
@@ -310,6 +313,10 @@ function ProviderHostSettings({ host }: { host: Host }) {
   const [error, setError] = useState<string | null>(null);
   const [detection, setDetection] = useState<SetupDetection | null>(null);
   const [detectionRequest, setDetectionRequest] = useState<SetupDetectRequest | null>(null);
+  const [piDefaultResult, setPiDefaultResult] = useState<{
+    inventory: SetupInventory;
+    provider: string | null;
+  } | null>(null);
   const [checkedStatuses, setCheckedStatuses] = useState<
     Partial<Record<SetupStatusHarness, SetupHarnessStatus>>
   >({});
@@ -327,7 +334,18 @@ function ProviderHostSettings({ host }: { host: Host }) {
   const operationPanelRef = useRef<HTMLDivElement | null>(null);
   const operationToRevealRef = useRef<string | null>(null);
 
-  const inventory = inventoryQuery.data;
+  const savedInventory = inventoryQuery.data;
+  const piDefaultChecked = !!piDefaultResult && piDefaultResult.inventory === savedInventory;
+  const inventory =
+    savedInventory && piDefaultChecked
+      ? {
+          ...savedInventory,
+          effective_defaults: {
+            ...savedInventory.effective_defaults,
+            pi: piDefaultResult.provider,
+          },
+        }
+      : savedInventory;
   const serverGate = isFeatureEnabled(info, "harness_install");
   const canMutate = !!inventory && inventory.mutations_enabled !== false && serverGate;
   const operationActive = operation?.state === "pending" || operation?.state === "running";
@@ -336,6 +354,7 @@ function ProviderHostSettings({ host }: { host: Host }) {
     actionMutation.isPending ||
     operationMutation.isPending ||
     statusMutation.isPending ||
+    piDefaultMutation.isPending ||
     operationActive ||
     operationRecoveryPending ||
     operationRecoveryError !== null;
@@ -405,6 +424,7 @@ function ProviderHostSettings({ host }: { host: Host }) {
   const act = async (action: SetupAction): Promise<boolean> => {
     if (operationActive || operationRecoveryPending || operationRecoveryError) return false;
     setCheckedStatuses({});
+    setPiDefaultResult(null);
     setStatusErrors({});
     setError(null);
     setNotice(null);
@@ -430,6 +450,26 @@ function ProviderHostSettings({ host }: { host: Host }) {
       setDetectionRequest(request ?? null);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Detection failed.");
+    }
+  };
+
+  const checkPiDefault = async () => {
+    if (busy || !savedInventory) return;
+    setPiDefaultResult(null);
+    setError(null);
+    try {
+      const result = await piDefaultMutation.mutateAsync();
+      const provider = result.pi_default_provider ?? null;
+      if (
+        result.pi_default_checked &&
+        (provider === null || savedInventory.providers.some((item) => item.name === provider))
+      ) {
+        setPiDefaultResult({ inventory: savedInventory, provider });
+      } else {
+        setError(result.warnings?.join(" ") || "Pi's default could not be checked.");
+      }
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Pi's default could not be checked.");
     }
   };
 
@@ -467,6 +507,7 @@ function ProviderHostSettings({ host }: { host: Host }) {
   ): Promise<boolean> => {
     if (operationActive || operationRecoveryPending || operationRecoveryError) return false;
     setCheckedStatuses({});
+    setPiDefaultResult(null);
     setStatusErrors({});
     setError(null);
     setNotice(null);
@@ -568,6 +609,8 @@ function ProviderHostSettings({ host }: { host: Host }) {
         detection={detection}
         detecting={detectionMutation.isPending}
         onDetect={() => void detect()}
+        piDefaultChecked={piDefaultChecked}
+        onCheckPiDefault={() => void checkPiDefault()}
         checkedStatuses={checkedStatuses}
         statusErrors={statusErrors}
         checkingHarness={checkingHarness}
@@ -767,7 +810,8 @@ function ProviderRow({
   onRemove: () => void;
 }) {
   const surfaces = providerSurfaces(provider);
-  const [surface, setSurface] = useState<ProviderSurface>(surfaces[0] ?? "openai");
+  const [selectedSurface, setSurface] = useState<ProviderSurface>(surfaces[0] ?? "openai");
+  const surface = surfaces.includes(selectedSurface) ? selectedSurface : surfaces[0];
   const effective = Object.entries(effectiveDefaults)
     .filter(([, name]) => name === provider.name)
     .map(([scope]) => scope);
@@ -1550,6 +1594,8 @@ function AgentSettings({
   detection,
   detecting,
   onDetect,
+  piDefaultChecked,
+  onCheckPiDefault,
   checkedStatuses,
   statusErrors,
   checkingHarness,
@@ -1571,6 +1617,8 @@ function AgentSettings({
   detection: SetupDetection | null;
   detecting: boolean;
   onDetect: () => void;
+  piDefaultChecked: boolean;
+  onCheckPiDefault: () => void;
   checkedStatuses: Partial<Record<SetupStatusHarness, SetupHarnessStatus>>;
   statusErrors: Partial<Record<SetupStatusHarness, string>>;
   checkingHarness: SetupStatusHarness | null;
@@ -1825,6 +1873,28 @@ function AgentSettings({
             onOperationChange={onOperationChange}
             onFinished={onOperationFinished}
           />
+        </div>
+      )}
+      {agent.id === "pi" && inventory.pi_default_requires_detection && (
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b p-4 text-sm">
+          <p className="text-muted-foreground">
+            {piDefaultChecked
+              ? inventory.effective_defaults.pi
+                ? `Default: ${inventory.effective_defaults.pi}`
+                : "No compatible default found."
+              : "Check local CLI configuration to identify Pi’s default."}
+          </p>
+          {canMutate && (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={busy}
+              onClick={onCheckPiDefault}
+            >
+              {piDefaultChecked ? "Check again" : "Check Pi default"}
+            </Button>
+          )}
         </div>
       )}
       {compatible.length > 0 && (
@@ -2790,18 +2860,20 @@ function ImportPreviewList({
               <div className="border-b px-3 py-2 text-sm font-medium capitalize">{source}</div>
               {groups[source].map((item) => (
                 <label
-                  key={`${source}:${item.name}`}
+                  key={`${source}:${item.name}:${item.fingerprint}`}
                   className="flex items-start gap-2 border-b p-3 last:border-b-0"
                 >
                   <input
                     type="checkbox"
                     disabled={!canMutate}
-                    checked={selected.includes(`${source}:${item.name}`)}
+                    checked={selected.includes(`${source}:${item.name}:${item.fingerprint}`)}
                     onChange={(e) =>
                       setSelected((old) =>
                         e.target.checked
-                          ? [...old, `${source}:${item.name}`]
-                          : old.filter((entry) => entry !== `${source}:${item.name}`),
+                          ? [...old, `${source}:${item.name}:${item.fingerprint}`]
+                          : old.filter(
+                              (entry) => entry !== `${source}:${item.name}:${item.fingerprint}`,
+                            ),
                       )
                     }
                   />
@@ -2820,12 +2892,14 @@ function ImportPreviewList({
                     size="sm"
                     disabled={
                       busy ||
-                      !groups[source].some((item) => selected.includes(`${source}:${item.name}`))
+                      !groups[source].some((item) =>
+                        selected.includes(`${source}:${item.name}:${item.fingerprint}`),
+                      )
                     }
                     onClick={() =>
                       void (() => {
                         const chosen = groups[source].filter((item) =>
-                          selected.includes(`${source}:${item.name}`),
+                          selected.includes(`${source}:${item.name}:${item.fingerprint}`),
                         );
                         return onAction({
                           action: "import_acp",

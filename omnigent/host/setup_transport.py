@@ -44,6 +44,7 @@ class HostSetupDispatcher:
         """Validate again on the host and return only sanitized result models."""
         from omnigent.onboarding.setup_schema import SETUP_ACTION_ADAPTER, SetupDetectRequest
         from omnigent.onboarding.setup_service import (
+            SetupPersistenceError,
             apply_setup_action,
             detect_setup_connections,
             get_setup_inventory,
@@ -128,6 +129,8 @@ class HostSetupDispatcher:
                         action.value for action in self._operations().supported_actions()
                     ]
             return HostSetupResultFrame(frame.request_id, payload=payload)
+        except SetupPersistenceError as exc:
+            return HostSetupResultFrame(frame.request_id, error_status=502, error=str(exc))
         except ValueError:
             return HostSetupResultFrame(
                 frame.request_id, error_status=400, error="invalid setup configuration"

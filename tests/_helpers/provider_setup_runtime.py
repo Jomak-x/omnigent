@@ -166,6 +166,9 @@ def install_guards() -> None:
     import omnigent.onboarding.ambient as ambient
 
     ambient._detect_providers_now = lambda *args, **kwargs: []
+    ambient._codex_config_path = lambda: (
+        Path(os.environ["OMNIGENT_CONFIG_HOME"]) / "codex/config.toml"
+    )
     ambient.CLAUDE_CODE_MANAGED_SETTINGS_PATHS = ()
     ambient._claude_login_detected = lambda: False
     ambient._ollama_reachable = lambda: False

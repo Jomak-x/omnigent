@@ -85,6 +85,7 @@ export interface SetupImportPreview {
 }
 
 export interface SetupDetectRequest {
+  pi_default?: boolean;
   import_path?: string;
   import_source?: "openclaw" | "acpx";
   harness?: SetupStatusHarness;
@@ -114,6 +115,8 @@ export interface SetupHarnessStatus {
 
 export interface SetupDetection {
   providers: DetectedConnection[];
+  pi_default_provider?: string | null;
+  pi_default_checked?: boolean;
   harness_status?: SetupHarnessStatus | null;
   imports: SetupImportPreview[];
   models: Record<string, string[]>;

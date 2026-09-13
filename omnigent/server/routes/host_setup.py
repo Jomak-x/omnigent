@@ -166,6 +166,8 @@ def create_host_setup_router(
         payload = _wire_model(body)
         if body.harness is None:
             payload.pop("harness", None)
+        if not body.pi_default:
+            payload.pop("pi_default", None)
         return await proxy_setup(host_registry, conn, SetupMethod.DETECT, payload=payload)
 
     @router.post("/hosts/{host_id}/setup-operations")

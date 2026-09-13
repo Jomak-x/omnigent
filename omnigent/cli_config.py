@@ -1014,17 +1014,36 @@ def _configure_harness_add(family: str | None = None) -> str | None:
     from omnigent.onboarding.configure_models import family_label
     from omnigent.onboarding.setup_operations import provider_add_settings, subscription_settings
 
+    previous_secret_ref: str | None = None
     if entry["kind"] == "subscription":
         settings, became_default = subscription_settings(_load_global_config(), str(entry["cli"]))
     else:
+        config_for_save = _load_global_config()
+        if entry["kind"] == "key":
+            old_provider = load_providers(config_for_save).get(name)
+            old_family = (
+                old_provider.families.get(family) if old_provider and family is not None else None
+            )
+            previous_secret_ref = old_family.api_key_ref if old_family else None
         settings, became_default = provider_add_settings(
-            _load_global_config(), name, entry, surface=family
+            config_for_save, name, entry, surface=family
         )
     _save_global_config(settings)
+    cleaned = True
+    if previous_secret_ref is not None:
+        from omnigent.onboarding.setup_operations import cleanup_unreferenced_secret
+
+        try:
+            cleanup_unreferenced_secret(previous_secret_ref, name)
+        except Exception:  # noqa: BLE001 - the config was saved before cleanup
+            cleaned = False
+    status = f"✓ Added {name}"
+    if not cleaned:
+        status += "; stored secret cleanup did not complete"
     if became_default:
         labels = " · ".join(family_label(f) for f in became_default)
-        return f"✓ Added {name} — default for {labels}"
-    return f"✓ Added {name}"
+        return f"{status} — default for {labels}"
+    return status
 
 
 def _adopt_detected_providers() -> list[str]:

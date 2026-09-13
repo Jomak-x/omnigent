@@ -267,6 +267,108 @@ def _check_acp_add_remove_and_import_fingerprint(runtime: ProviderSetupRuntime) 
     return {"save_did_not_execute_acp": True, "stale_import_rejected": True}
 
 
+def _check_scope_replacement_in_browser(page: Page, runtime: ProviderSetupRuntime) -> bool:
+    _action(
+        runtime,
+        {
+            "action": "add_gateway",
+            "name": "scope-reuse",
+            "base_url": f"http://127.0.0.1:{runtime.mock_ports[0]}/v1",
+            "families": ["anthropic", "openai"],
+            "wire_api": "chat",
+            "models": {"anthropic": "fixture-claude", "openai": "fixture-openai"},
+            "secret": "fixture-scope-secret",
+        },
+    )
+    page.reload()
+    page.get_by_text("Advanced provider tools", exact=True).click()
+    page.get_by_text("Manage all connections", exact=True).click()
+    row = page.get_by_test_id("provider-row-scope-reuse")
+    scope = row.get_by_label("Default scope for scope-reuse")
+    scope.click()
+    page.get_by_role("option", name="OpenAI", exact=True).click()
+    expect(scope).to_contain_text("OpenAI")
+
+    _action(
+        runtime,
+        {
+            "action": "add_gateway",
+            "name": "scope-reuse",
+            "base_url": f"http://127.0.0.1:{runtime.mock_ports[0]}/v1",
+            "families": ["anthropic"],
+            "models": {"anthropic": "fixture-claude-next"},
+            "secret": "fixture-scope-next",
+        },
+    )
+    # An unrelated UI save refreshes inventory without remounting this named row.
+    page.get_by_test_id("provider-row-fixture-secondary").get_by_role(
+        "button", name="Make default"
+    ).click()
+    expect(scope).to_contain_text("Anthropic")
+    scope.click()
+    expect(page.get_by_role("option", name="OpenAI", exact=True)).to_have_count(0)
+    page.keyboard.press("Escape")
+    with page.expect_request(f"**/v1/hosts/{HOST_IDS[0]}/setup/actions") as request:
+        row.get_by_role("button", name="Make default").click()
+    assert request.value.post_data_json == {
+        "action": "set_default",
+        "name": "scope-reuse",
+        "surface": "anthropic",
+    }
+    expect(row).to_contain_text("Default for Anthropic")
+    saved = _config(runtime)["providers"]["scope-reuse"]
+    assert "openai" not in saved
+    assert saved["default"] in (True, "anthropic", ["anthropic"])
+    return True
+
+
+def _check_import_preview_switch_in_browser(page: Page, runtime: ProviderSetupRuntime) -> bool:
+    source_a = runtime.root / "import-preview-a.json"
+    source_b = runtime.root / "import-preview-b.json"
+    source_a.write_text(json.dumps({"agents": {"Preview Swap": {"command": "fixture-a"}}}))
+    source_b.write_text(json.dumps({"agents": {"Preview Swap": {"command": "fixture-b"}}}))
+    page.get_by_role("button", name="Back to tools", exact=True).click()
+    page.get_by_text("Import ACP agents", exact=True).click()
+    page.get_by_label("Import format", exact=True).click()
+    page.get_by_role("option", name="acpx", exact=True).click()
+    path = page.get_by_label("Configuration path", exact=True)
+    button = page.get_by_role("button", name="Import selected acpx agents")
+
+    path.fill(str(source_a))
+    with page.expect_response(f"**/v1/hosts/{HOST_IDS[0]}/setup/detect") as first:
+        page.get_by_role("button", name="Preview import").click()
+    fingerprint_a = first.value.json()["imports"][0]["fingerprint"]
+    checkbox = page.get_by_role("checkbox")
+    expect(checkbox).to_have_count(1)
+    checkbox.check()
+    expect(button).to_be_enabled()
+
+    path.fill(str(source_b))
+    with page.expect_response(f"**/v1/hosts/{HOST_IDS[0]}/setup/detect") as second:
+        page.get_by_role("button", name="Preview import").click()
+    fingerprint_b = second.value.json()["imports"][0]["fingerprint"]
+    assert fingerprint_b != fingerprint_a
+    expect(checkbox).not_to_be_checked()
+    expect(button).to_be_disabled()
+    checkbox.check()
+    with (
+        page.expect_request(f"**/v1/hosts/{HOST_IDS[0]}/setup/actions") as request,
+        page.expect_response(f"**/v1/hosts/{HOST_IDS[0]}/setup/actions") as response,
+    ):
+        button.click()
+    assert response.value.status == 200
+    assert request.value.post_data_json == {
+        "action": "import_acp",
+        "source": "acpx",
+        "names": ["Preview Swap"],
+        "path": str(source_b),
+        "fingerprints": {"Preview Swap": fingerprint_b},
+    }
+    saved = _config(runtime)["acp"]["agents"]
+    assert next(row for row in saved if row["name"] == "Preview Swap")["command"] == "fixture-b"
+    return True
+
+
 def _check_malformed_config_is_rejected_before_secret_write(runtime: ProviderSetupRuntime) -> bool:
     path = _config_path(runtime)
     path.write_text("[broken")
@@ -329,6 +431,8 @@ def exercise_provider_mutations(
         "shared_owned_slot_retained": _check_shared_secret_is_retained(runtime),
         "provider_and_harness_controls": _check_provider_and_harness_controls(runtime),
         "acp_and_import": _check_acp_add_remove_and_import_fingerprint(runtime),
+        "scope_replacement_browser": _check_scope_replacement_in_browser(page, runtime),
+        "import_preview_switch_browser": _check_import_preview_switch_in_browser(page, runtime),
     }
     _write_sanitized_state(runtime, recordings)
     result["malformed_config_rejected_before_secret_write"] = (

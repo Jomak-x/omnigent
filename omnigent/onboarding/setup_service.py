@@ -67,6 +67,13 @@ if TYPE_CHECKING:
     from omnigent.onboarding.openclaw_config import OpenClawDiscovery
 
 
+class SetupPersistenceError(ValueError):
+    """A failed settings save also left a fresh stored secret to clean up."""
+
+    def __init__(self) -> None:
+        super().__init__("Setup was not saved; stored secret cleanup did not complete")
+
+
 def _public_url(value: str) -> str:
     try:
         parsed = urlsplit(value)
@@ -234,6 +241,19 @@ def get_setup_inventory() -> SetupInventory:
 def detect_setup_connections(request: SetupDetectRequest | None = None) -> SetupDetection:
     """Explicitly inspect host vendor configuration and model catalogs."""
     request = request or SetupDetectRequest()
+    if request.pi_default:
+        from omnigent.onboarding.provider_config import default_provider_for_harness
+
+        try:
+            entry = default_provider_for_harness(operations.load_setup_config(), "pi")
+            return SetupDetection(
+                pi_default_provider=entry.name if entry else None,
+                pi_default_checked=True,
+            )
+        except Exception:
+            return SetupDetection(
+                warnings=["The Pi default could not be checked on this computer"]
+            )
     if request.harness is not None:
         from omnigent.onboarding.harness_readiness import (
             _canonical_harness,
@@ -326,9 +346,7 @@ def _save_credential_settings(
             try:
                 operations.cleanup_unreferenced_secret(ref, name)
             except Exception:
-                raise ValueError(
-                    "Setup was not saved; stored secret cleanup did not complete"
-                ) from None
+                raise SetupPersistenceError() from None
         raise
     cleaned = True
     for previous in previous_refs:

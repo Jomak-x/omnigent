@@ -413,6 +413,133 @@ describe("ProviderSettingsSection", () => {
     expect(screen.queryByRole("button", { name: "Use for new Pi sessions" })).toBeNull();
   });
 
+  it("drops an unsupported default scope when a connection is replaced", async () => {
+    hosts = [online("mac")];
+    const provider = {
+      name: "gateway",
+      kind: "gateway",
+      families: ["anthropic", "openai"],
+      defaults: [],
+      default_scopes: ["anthropic", "openai", "pi"],
+      credential_sources: {},
+      models: {},
+      base_urls: {},
+    };
+    inventories.set("mac", inventory({ providers: [provider] }));
+    const { client } = renderSection();
+    await openAdvanced("Manage all connections");
+    const row = screen.getByTestId("provider-row-gateway");
+    fireEvent.change(within(row).getByTestId("mock-select"), { target: { value: "openai" } });
+    const replacement = inventory({
+      providers: [{ ...provider, families: ["anthropic"], default_scopes: ["anthropic", "pi"] }],
+    });
+    inventories.set("mac", replacement);
+    await act(async () => {
+      client.setQueryData(["provider-setup", "mac"], replacement);
+    });
+    await waitFor(() => expect(within(row).getByTestId("mock-select")).toHaveValue("anthropic"));
+    fireEvent.click(within(row).getByRole("button", { name: "Make default" }));
+    await waitFor(() =>
+      expect(runSetupActionMock).toHaveBeenCalledWith("mac", {
+        action: "set_default",
+        name: "gateway",
+        surface: "anthropic",
+      }),
+    );
+  });
+
+  it("checks Pi's inherited default explicitly and clears it after a failed recheck", async () => {
+    hosts = [online("mac")];
+    inventories.set(
+      "mac",
+      inventory({
+        providers: [
+          {
+            name: "codex-config",
+            kind: "cli-config",
+            families: ["openai", "pi"],
+            default_scopes: ["openai", "pi"],
+            defaults: ["openai"],
+            credential_sources: {},
+            models: {},
+            base_urls: {},
+          },
+        ],
+        effective_defaults: { openai: "codex-config", pi: null },
+        pi_default_requires_detection: true,
+      }),
+    );
+    detectSetupMock
+      .mockResolvedValueOnce({
+        providers: [],
+        imports: [],
+        models: {},
+        pi_default_checked: true,
+        pi_default_provider: "codex-config",
+      })
+      .mockRejectedValueOnce(new Error("Host unavailable"));
+    renderSection();
+    await openAgent("pi");
+    const row = screen.getByTestId("agent-provider-row-codex-config");
+    expect(row).not.toHaveTextContent("Used for new sessions");
+    expect(detectSetupMock).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Check Pi default" }));
+    await waitFor(() => expect(row).toHaveTextContent("Used for new sessions"));
+    expect(detectSetupMock).toHaveBeenCalledWith("mac", { pi_default: true });
+    fireEvent.click(screen.getByRole("button", { name: "Check again" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Host unavailable");
+    expect(row).not.toHaveTextContent("Used for new sessions");
+    expect(screen.getByRole("button", { name: "Check Pi default" })).toBeEnabled();
+  });
+
+  it("discards a late Pi default result after the saved inventory changes", async () => {
+    hosts = [online("mac")];
+    const original = inventory({
+      providers: [
+        {
+          name: "codex-config",
+          kind: "cli-config",
+          families: ["openai", "pi"],
+          default_scopes: ["openai", "pi"],
+          defaults: ["openai"],
+          credential_sources: {},
+          models: {},
+          base_urls: {},
+        },
+      ],
+      effective_defaults: { openai: "codex-config", pi: null },
+      pi_default_requires_detection: true,
+    });
+    inventories.set("mac", original);
+    let resolve!: (result: Awaited<ReturnType<typeof detectSetup>>) => void;
+    detectSetupMock.mockReturnValue(
+      new Promise((done) => {
+        resolve = done;
+      }),
+    );
+    const { client } = renderSection();
+    await openAgent("pi");
+    fireEvent.click(screen.getByRole("button", { name: "Check Pi default" }));
+    await waitFor(() => expect(detectSetupMock).toHaveBeenCalled());
+    const updated = { ...original, dismissed_detections: ["changed"] };
+    await act(async () => {
+      client.setQueryData(["provider-setup", "mac"], updated);
+    });
+    await act(async () => {
+      resolve({
+        providers: [],
+        imports: [],
+        models: {},
+        pi_default_checked: true,
+        pi_default_provider: "codex-config",
+      });
+    });
+    expect(screen.getByTestId("agent-provider-row-codex-config")).not.toHaveTextContent(
+      "Used for new sessions",
+    );
+    expect(screen.getByRole("button", { name: "Check Pi default" })).toBeEnabled();
+  });
+
   it("uses the Pi scope for its default action while advanced keeps its scope picker", async () => {
     hosts = [online("mac", "Mac")];
     inventories.set(
@@ -879,6 +1006,54 @@ describe("ProviderSettingsSection", () => {
     expect(detectSetupMock).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: /detect credentials/i }));
     await waitFor(() => expect(detectSetupMock).toHaveBeenCalledWith("mac", undefined));
+  });
+
+  it("requires a new selection when an import preview changes its command", async () => {
+    hosts = [online("mac")];
+    inventories.set("mac", inventory());
+    const preview = (fingerprint: string) => ({
+      providers: [],
+      models: {},
+      imports: [
+        {
+          source: "openclaw" as const,
+          name: "agent",
+          slug: "agent",
+          command: fingerprint,
+          fingerprint,
+        },
+      ],
+    });
+    detectSetupMock
+      .mockResolvedValueOnce(preview("command-a"))
+      .mockResolvedValueOnce(preview("command-b"));
+    renderSection();
+    await openAdvanced("Import ACP agents");
+    fireEvent.change(screen.getByLabelText("Configuration path"), {
+      target: { value: "/tmp/a.json" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /preview import/i }));
+    fireEvent.click(await screen.findByRole("checkbox", { name: /command-a/ }));
+    expect(screen.getByRole("button", { name: /import selected openclaw/i })).toBeEnabled();
+    fireEvent.change(screen.getByLabelText("Configuration path"), {
+      target: { value: "/tmp/b.json" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /preview import/i }));
+    const changed = await screen.findByRole("checkbox", { name: /command-b/ });
+    expect(changed).not.toBeChecked();
+    expect(screen.getByRole("button", { name: /import selected openclaw/i })).toBeDisabled();
+    expect(runSetupActionMock).not.toHaveBeenCalled();
+    fireEvent.click(changed);
+    fireEvent.click(screen.getByRole("button", { name: /import selected openclaw/i }));
+    await waitFor(() =>
+      expect(runSetupActionMock).toHaveBeenCalledWith("mac", {
+        action: "import_acp",
+        source: "openclaw",
+        names: ["agent"],
+        path: "/tmp/b.json",
+        fingerprints: { agent: "command-b" },
+      }),
+    );
   });
 
   it("preserves an ACP import path and preview fingerprints through confirmation", async () => {

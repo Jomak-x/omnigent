@@ -130,6 +130,7 @@ class SetupDetectRequest(SetupModel):
     import_path: str | None = Field(default=None, max_length=4096)
     import_source: Literal["openclaw", "acpx"] | None = None
     harness: StatusHarness | None = None
+    pi_default: bool = False
 
 
 class ImportAcp(SetupModel):
@@ -251,6 +252,8 @@ class SetupDetection(SetupModel):
     warnings: list[str] = Field(default_factory=list)
     default_models: dict[str, str | None] = Field(default_factory=dict)
     harness_status: HarnessStatus | None = None
+    pi_default_provider: str | None = None
+    pi_default_checked: bool = False
 
 
 class SetupActionResult(SetupModel):

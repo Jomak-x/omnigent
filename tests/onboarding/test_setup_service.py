@@ -470,6 +470,61 @@ def test_passive_explicit_pi_cli_config_does_not_probe(monkeypatch: pytest.Monke
     assert not inventory.pi_default_requires_detection
 
 
+@pytest.mark.parametrize("can_serve_pi", [False, True])
+def test_implicit_pi_cli_config_requires_explicit_resolution(
+    monkeypatch: pytest.MonkeyPatch, can_serve_pi: bool
+):
+    from omnigent.onboarding import provider_config, providers
+
+    save_global_config(
+        {
+            "providers": {
+                "codex-config": {
+                    "kind": "cli-config",
+                    "cli": "codex",
+                    "model_provider": "Fixture",
+                    "default": "openai",
+                }
+            }
+        }
+    )
+    checks: list[str] = []
+
+    def capable(entry):
+        checks.append(entry.name)
+        return can_serve_pi
+
+    monkeypatch.setattr(provider_config, "_cli_config_serves_pi", capable)
+    inventory = service.get_setup_inventory()
+    assert inventory.effective_defaults["pi"] is None
+    assert inventory.pi_default_requires_detection
+    assert checks == []
+    monkeypatch.setattr(ambient, "detect_providers", lambda **_: pytest.fail("vendor detected"))
+    monkeypatch.setattr(service, "_discover_imports", lambda *_: pytest.fail("imports read"))
+    monkeypatch.setattr(providers, "get_chat_models", lambda *_: pytest.fail("catalog fetched"))
+    result = service.detect_setup_connections(SetupDetectRequest(pi_default=True))
+    assert checks == ["codex-config"]
+    assert result.pi_default_checked
+    assert result.pi_default_provider == ("codex-config" if can_serve_pi else None)
+    assert result.providers == []
+    assert result.imports == []
+    assert result.models == {}
+
+
+def test_pi_resolution_failure_is_sanitized_and_unchecked(monkeypatch: pytest.MonkeyPatch):
+    from omnigent.onboarding import provider_config
+
+    def fail(_config, _harness):
+        raise RuntimeError("fixture-sensitive-value")
+
+    monkeypatch.setattr(provider_config, "default_provider_for_harness", fail)
+    result = service.detect_setup_connections(SetupDetectRequest(pi_default=True))
+    assert result.pi_default_provider is None
+    assert not result.pi_default_checked
+    assert result.warnings == ["The Pi default could not be checked on this computer"]
+    assert "fixture-sensitive-value" not in result.model_dump_json()
+
+
 def test_invalid_acp_config_rejected_before_credential_write(monkeypatch: pytest.MonkeyPatch):
     save_global_config(
         {"acp": {"agents": [{"name": "Fixture", "command": "fixture", "omnigent_mcp": "invalid"}]}}
@@ -626,6 +681,31 @@ def test_failed_save_cleans_fresh_secret(harness: str | None, monkeypatch: pytes
         save("replacement-fixture")
     assert load_global_config() == before
     assert secrets._read_secrets_file() == original
+
+
+@pytest.mark.parametrize("harness", [None, "cursor"])
+def test_failed_save_and_cleanup_reports_sanitized_persistence_error(
+    harness: str | None, monkeypatch: pytest.MonkeyPatch
+):
+    before = load_global_config()
+
+    def fail_save(*_args, **_kwargs):
+        raise OSError("fixture-private-save-secret")
+
+    def fail_cleanup(*_args):
+        raise OSError("fixture-private-cleanup-secret")
+
+    monkeypatch.setattr(service.operations, "save_setup_settings", fail_save)
+    monkeypatch.setattr(service.operations, "cleanup_unreferenced_secret", fail_cleanup)
+    with pytest.raises(service.SetupPersistenceError) as failure:
+        if harness:
+            apply(action="set_harness_key", harness=harness, secret="fixture-secret")
+        else:
+            gateway(secret="fixture-secret")
+    assert str(failure.value) == "Setup was not saved; stored secret cleanup did not complete"
+    assert "fixture-private" not in str(failure.value)
+    assert "fixture-secret" not in str(failure.value)
+    assert load_global_config() == before
 
 
 @pytest.mark.parametrize("harness", [None, "cursor", "antigravity", "copilot"])

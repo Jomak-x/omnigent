@@ -405,6 +405,83 @@ async def test_detection_forwards_explicit_harness_status_to_selected_host():
     store.get_host.assert_called_once_with("host-a")
 
 
+async def test_detection_forwards_opt_in_pi_default_only_when_requested():
+    app, _, conn, _ = make_app()
+    responder = asyncio.create_task(respond(conn, {"pi_default_checked": True}))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        result = await client.post(
+            "/v1/hosts/host-a/setup/detect",
+            headers={"x-user": "alice"},
+            json={"pi_default": True},
+        )
+    frame = await asyncio.wait_for(responder, timeout=2)
+    assert result.status_code == 200
+    assert frame.secret_payload == {
+        "import_path": None,
+        "import_source": None,
+        "pi_default": True,
+    }
+
+
+async def test_failed_save_and_cleanup_returns_sanitized_http_status(monkeypatch, tmp_path):
+    from omnigent.host.setup_transport import HostSetupDispatcher
+
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path))
+
+    def fail_save(*_args, **_kwargs):
+        raise OSError("fixture-private-save-secret")
+
+    def fail_cleanup(*_args):
+        raise OSError("fixture-private-cleanup-secret")
+
+    monkeypatch.setattr(
+        "omnigent.onboarding.setup_operations.store_staged_secret", lambda *_: None
+    )
+    monkeypatch.setattr("omnigent.onboarding.setup_operations.save_setup_settings", fail_save)
+    monkeypatch.setattr(
+        "omnigent.onboarding.setup_operations.cleanup_unreferenced_secret", fail_cleanup
+    )
+    app, _, conn, _ = make_app()
+    dispatcher = HostSetupDispatcher()
+
+    async def host():
+        request = decode_host_frame(await conn.outbound_queue.get())
+        assert isinstance(request, HostSetupRequestFrame)
+        result = await dispatcher.request(request, Mock())
+        conn.pending_setup[request.request_id].set_result(
+            {
+                "payload": result.payload,
+                "error_status": result.error_status,
+                "error": result.error,
+            }
+        )
+        return result
+
+    host_task = asyncio.create_task(host())
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/v1/hosts/host-a/setup/actions",
+            headers={"x-user": "alice"},
+            json={
+                "action": "add_gateway",
+                "name": "fixture-gateway",
+                "base_url": "https://gateway.example/v1",
+                "families": ["openai"],
+                "models": {"openai": "fixture-model"},
+                "secret": "fixture-sensitive-value",
+            },
+        )
+    frame = await asyncio.wait_for(host_task, timeout=2)
+    safe_message = "Setup was not saved; stored secret cleanup did not complete"
+    assert frame.error_status == 502
+    assert frame.error == safe_message
+    assert response.status_code == 502
+    assert response.json() == {"detail": safe_message}
+    assert "fixture-sensitive-value" not in repr(frame)
+    assert "fixture-sensitive-value" not in response.text
+    assert "fixture-private" not in response.text
+
+
 @pytest.mark.parametrize(
     ("options", "headers", "harness", "expected"),
     [

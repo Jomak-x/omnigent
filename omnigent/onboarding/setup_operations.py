@@ -120,6 +120,8 @@ def _merge_fields(old: dict[str, object], new: dict[str, object]) -> dict[str, o
     if "api_key_ref" in new:
         merged.pop("api_key", None)
         merged.pop("auth_command", None)
+    if "base_url" in new and new["base_url"] != old.get("base_url") and "wire_api" not in new:
+        merged.pop("wire_api", None)
     for key, value in new.items():
         previous = merged.get(key)
         merged[key] = (
