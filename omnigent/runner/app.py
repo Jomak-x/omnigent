@@ -7001,13 +7001,11 @@ def create_runner_app(
                         raise
             harness_client = None
             if process_manager is not None:
-                try:
+                with contextlib.suppress(NoLiveHarnessError):
                     harness_client = await asyncio.wait_for(
                         process_manager.get_client(conv_id, "any"),
                         timeout=_ANTIGRAVITY_INTERRUPT_TIMEOUT_S,
                     )
-                except NoLiveHarnessError:
-                    pass
             if harness_client is not None:
                 coordinated = await asyncio.wait_for(
                     harness_client.post(
@@ -7022,9 +7020,7 @@ def create_runner_app(
                 _native_interrupt_runner._wake_parent_after_native_interrupt(conv_id)
                 response = Response(status_code=204)
             else:
-                response = await _native_interrupt_runner.interrupt(
-                    "antigravity-native", conv_id
-                )
+                response = await _native_interrupt_runner.interrupt("antigravity-native", conv_id)
         except (httpx.HTTPError, RuntimeError, OSError, TimeoutError):
             return JSONResponse(
                 status_code=503,
@@ -9053,9 +9049,7 @@ def create_runner_app(
                     _session_histories[conversation_id] = loaded
 
                 if conversation_id in _antigravity_pending_stops:
-                    _session_message_buffers.setdefault(conversation_id, []).append(
-                        message_body
-                    )
+                    _session_message_buffers.setdefault(conversation_id, []).append(message_body)
                     return JSONResponse(
                         status_code=202,
                         content={

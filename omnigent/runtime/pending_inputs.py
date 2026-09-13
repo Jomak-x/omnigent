@@ -1,7 +1,7 @@
 """In-process index of un-consumed web-composer user messages.
 
 Backs the optimistic "queued message" bubble for native-terminal
-sessions (claude-native / codex-native) so it survives a client
+sessions so it survives a client
 re-bind. On those sessions the Omnigent server does NOT persist a web-typed
 user message at POST time — the message is forwarded into the vendor
 TUI and the transcript forwarder later mirrors it back as the single
@@ -22,7 +22,7 @@ uses for transient recovery state (:mod:`pending_elicitations`,
   :func:`snapshot_for`, so a (re)connecting client re-hydrates the
   bubble instead of showing nothing;
 * drained when the transcript forwarder persists the matching user
-  message (via :func:`resolve_oldest`), so the now-committed item
+  message at the persistence boundary, so the now-committed item
   doesn't double-render alongside a stale pending entry.
 
 Unlike :mod:`pending_elicitations` / :mod:`inflight_text`, this index
@@ -32,20 +32,18 @@ sender can adopt it and dedupe cleanly), and draining needs to run at
 the persist site so the ``session.input.consumed`` event can carry the
 cleared id. Both are caller-driven, so the access is explicit.
 
-Draining is by FIFO order (oldest first), NOT by text. Native gives no
-id channel back through the TUI to correlate the forwarded POST with the
-mirrored transcript item, and the transcript freely reformats the text
-(reply-quote ``>`` blockquotes, ``[Attached:]`` markers, whitespace), so
-matching on text is unreliable — it would leave a reformatted message
-stuck pending and double-rendered. Per-session SSE ordering guarantees
-the i-th persisted user message corresponds to the i-th queued one, so
-each persisted native user message drains the oldest pending entry.
+Most native harnesses drain by FIFO order (:func:`resolve_oldest`) because
+transcript formatting can change the forwarded text. A directly typed TUI
+message can therefore consume an unrelated web pending entry on those paths.
+Kiro instead uses :func:`resolve_matching_text` to match normalized prompt text
+and retire preceding unmatched entries.
 
-The one imperfect case is interleaving a web-composer message with a
-message typed directly in the TUI: the TUI message (which has no pending
-entry) drains the oldest web entry, so that web bubble briefly
-disappears and reappears once it persists. It self-heals; the committed
-bubble always renders the just-persisted content regardless.
+Antigravity uses :func:`resolve_matching_antigravity_text` to consume only the
+first matching queued input, preserving unmatched steering and ordering among
+identical prompts. :func:`set_matching_content` retains resolved attachment
+content for transport matching; the original content, author, and stable ID
+remain available for durable persistence. An idempotent replay restores a
+drained entry to its queue position via :func:`restore`.
 
 Limitations (identical to :mod:`pending_elicitations`):
 
@@ -571,13 +569,14 @@ def _matches_antigravity_attachment_marker(block: dict[str, Any], line: str) -> 
         if raw is None:
             return re.fullmatch(collision_pattern, actual_name) is not None
         return actual_name == (
-            f"{expected_path.stem}_{hashlib.sha256(raw).hexdigest()[:12]}"
-            f"{expected_path.suffix}"
+            f"{expected_path.stem}_{hashlib.sha256(raw).hexdigest()[:12]}{expected_path.suffix}"
         )
     extension = _attachment_extension(block)
-    return extension is not None and re.fullmatch(
-        rf"attachment_[0-9a-f]{{8}}{re.escape(extension)}", actual_name
-    ) is not None
+    return (
+        extension is not None
+        and re.fullmatch(rf"attachment_[0-9a-f]{{8}}{re.escape(extension)}", actual_name)
+        is not None
+    )
 
 
 def _attachment_bytes(block: dict[str, Any]) -> bytes | None:

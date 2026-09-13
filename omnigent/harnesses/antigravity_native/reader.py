@@ -3,7 +3,7 @@
 The reader prefers agy's connect-RPC trajectory stream, which supports full
 tool and interaction events. When the local RPC is unavailable, it tails the
 transcript inside this bridge's isolated Gemini directory. That fallback mirrors
-committed assistant text and uses agy's Stop hook for turn completion; tool
+committed user/assistant text and uses agy's Stop hook for turn completion; tool
 approvals remain in the native terminal.
 """
 
@@ -823,12 +823,12 @@ async def _discover(
     skip_cascade_ids: frozenset[str] = frozenset(),
 ) -> tuple[str, int] | TranscriptBinding | None:
     """
-    Resolve ``(cascade_id, port)``, polling until ready or asked to stop.
+    Resolve an owned RPC conversation or transcript, polling until ready.
 
-    Two stages, each "poll until ready, never guess": first the real cascade id
-    from bridge state (past the launcher placeholder), then the connect-RPC port
-    that confirms ownership of that cascade. Discovery work (file read + blocking
-    httpx TLS probes) runs in a worker thread so the event loop stays responsive.
+    Prefer the connect-RPC port that confirms ownership of the real cascade id.
+    Otherwise use the isolated CLI's validated transcript once it changes after
+    launch, checking its own cascade for RPC availability first. Discovery work
+    runs in a worker thread so the event loop stays responsive.
 
     Readiness is checked BEFORE ``stop`` each round, so a discovery that resolves
     immediately consumes none of the caller's poll budget — ``stop`` is a
@@ -839,8 +839,9 @@ async def _discover(
     :param poll_interval_s: Seconds to wait between discovery polls.
     :param stop: Predicate consulted only when a round did NOT resolve; when it
         returns ``True`` the discovery loop gives up (the runner owns restart).
-    :returns: ``(cascade_id, port)`` once both resolve, or ``None`` if ``stop``
-        fired before discovery completed.
+    :param skip_cascade_ids: Previously consumed cascades excluded from discovery.
+    :returns: ``(cascade_id, port)`` for RPC, a :class:`TranscriptBinding` for
+        fallback, or ``None`` if ``stop`` fired before discovery completed.
     """
     while True:
         cascade_id = await asyncio.to_thread(_resolve_cascade_id, bridge_dir)
@@ -1209,8 +1210,8 @@ async def supervise_reader(
     If RPC cannot authenticate, the bridge-owned transcript supplies committed
     user and assistant messages, while agy's Stop hook closes each turn.
 
-    De-dup is by ``(trajectory_id, step_index)`` identity in an in-memory
-    seen-set (no durable cursor — retired in Task 12), so re-reading the same
+    RPC de-dup is by ``(trajectory_id, step_index)`` identity in an in-memory
+    seen-set, so re-reading the same
     snapshot posts nothing. Tool-call ids are derived from each step's own
     ``(trajectory, step)`` identity by the mapper, so a re-read or a fallback to
     a different RPC re-derives the same id rather than re-keying the pair.
@@ -3499,7 +3500,7 @@ async def run_reader_with_bridge(
     bridge_dir: Path,
 ) -> None:
     """
-    Run the agy RPC streaming reader + interaction bridge for one session.
+    Run the native reader and wire interactions when RPC is available.
 
     The single, shared read-path entry point used by BOTH host-spawned (runner)
     and CLI-fallback launches. It owns the long-lived Omnigent HTTP client (the
@@ -3514,9 +3515,9 @@ async def run_reader_with_bridge(
       worker thread (the RPC is synchronous);
     * ``deliver`` → the bridge default (``handle_user_interaction`` in a thread).
 
-    The reader discovers the cascade id + connect-RPC port and hands BOTH to the
-    callback, so the bridge targets agy's live conversation without
-    re-discovering (which could bind a recycled/foreign port).
+    In RPC mode the reader hands the discovered cascade id and port to the
+    callback, avoiding rediscovery that could bind a recycled/foreign port.
+    Transcript fallback does not invoke the interaction callback.
 
     Task T-G ``/clear`` rotation: this LOOPS. :func:`supervise_reader` returns the
     new cascade id when it detects a TUI ``/clear`` (via

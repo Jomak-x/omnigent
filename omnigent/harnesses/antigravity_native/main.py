@@ -6,7 +6,7 @@ It creates or binds an Omnigent session, launches ``agy`` in a runner-owned
 tmux terminal resource, then attaches the local TTY (directly to the
 runner's tmux when same-machine, else over the WebSocket terminal bridge).
 
-The reader prefers agy's connect-RPC steps and can mirror committed assistant
+The reader prefers agy's connect-RPC steps and can mirror committed user/assistant
 text from the session-scoped transcript when the local RPC is unavailable.
 Attended web turns are typed into the same TUI that the user can see.
 

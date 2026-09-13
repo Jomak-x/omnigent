@@ -2422,9 +2422,8 @@ async def _persist_external_conversation_item(
             drained = matched.matched
             skipped_kiro_pending = matched.skipped
         elif (
-            (native_agent := _native_coding_agent_for_session(conv)) is not None
-            and native_agent.harness == "antigravity-native"
-        ):
+            native_agent := _native_coding_agent_for_session(conv)
+        ) is not None and native_agent.harness == "antigravity-native":
             text = _message_text(item.data.content) or ""
             drained = pending_inputs.resolve_matching_antigravity_text(session_id, text)
         else:

@@ -11,14 +11,14 @@ Mirrors :class:`omnigent.runner.codex.goal.CodexGoalRunner`: app-scope state
 injected at construction so the class stays out of the already-large app module
 while preserving the exact behavior of the original closures.
 
-The seven uniform interrupt harnesses and six uniform stop harnesses differ
-only by bridge module, control-function name, and error label; they collapse to
+The uniform interrupt and stop harnesses differ only by bridge module,
+control-function name, and error label; they collapse to
 two parametrized methods driven by :data:`_UNIFORM_INTERRUPT` /
 :data:`_UNIFORM_STOP`. claude interrupt (bridge-id resolution) and codex
 interrupt (MCP-startup + app-server ``turn/interrupt``) and antigravity
-interrupt (RPC + active TUI fallback) keep dedicated methods (ten interrupt
-handlers total); claude stop is likewise special-cased and codex/pi/antigravity
-alias stop to their interrupt handler (seven distinct stop implementations).
+interrupt (RPC + active TUI fallback) keep dedicated methods; claude stop is
+likewise special-cased and codex/pi/antigravity alias stop to their interrupt
+handler.
 
 OpenCode-native has no handler here, so :meth:`interrupt` / :meth:`stop`
 return ``None`` and the caller falls through to the in-process turn cancel.
@@ -339,8 +339,8 @@ class NativeInterruptRunner:
     async def stop(self, harness_name: str | None, conv_id: str) -> Response | None:
         """Dispatch a stop_session to the harness's bridge.
 
-        codex/pi/antigravity have no distinct stop — they route to their interrupt handler,
-        exactly as the original dispatch chain did.
+        codex/pi/antigravity have no distinct stop — they route to their
+        interrupt handler.
 
         :returns: A response when this harness has a stop handler, else ``None``
             so the caller falls through to the in-process turn cancel.

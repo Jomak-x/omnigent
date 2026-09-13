@@ -1,4 +1,4 @@
-"""Record agy's documented Stop hook without exposing the session transcript."""
+"""Record agy's native Stop hook without exposing the session transcript."""
 
 from __future__ import annotations
 
