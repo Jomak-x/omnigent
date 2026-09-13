@@ -48,6 +48,23 @@ def secrets(runtime: ProviderSetupRuntime) -> dict[str, str]:
     return json.loads(path.read_text()) if path.exists() else {}
 
 
+def fill_replacement(page: Page, secret: str) -> None:
+    page.get_by_text("Advanced provider tools", exact=True).click()
+    page.get_by_text("Add a provider", exact=True).click()
+    page.get_by_role("button", name="Add provider", exact=True).click()
+    page.get_by_label("Vendor", exact=True).click()
+    option = next(
+        text
+        for text in page.get_by_role("option").all_inner_texts()
+        if text.lower().startswith("openai")
+    )
+    page.get_by_role("option", name=option, exact=True).click()
+    page.get_by_label("API key", exact=True).fill(secret)
+    page.get_by_role("button", name="More options", exact=True).click()
+    page.get_by_label("Connection name", exact=True).fill("fault-original")
+    page.get_by_label("Default model", exact=True).fill("fixture-model-new")
+
+
 def check(page: Page, runtime: FaultRuntime, recordings: Path) -> dict[str, object]:
     baseline = action(runtime, "fixture-original-credential")
     assert baseline.status_code == 200, baseline.text
@@ -62,20 +79,7 @@ def check(page: Page, runtime: FaultRuntime, recordings: Path) -> dict[str, obje
     page.get_by_test_id("settings-providers-host").click()
     page.get_by_role("option", name="Fixture computer A · online", exact=True).click()
     page.get_by_test_id("setup-agent-codex").click()
-    page.get_by_text("Advanced provider tools", exact=True).click()
-    page.get_by_text("Add a provider", exact=True).click()
-    page.get_by_role("button", name="Add provider", exact=True).click()
-    page.get_by_label("Vendor", exact=True).click()
-    option = next(
-        text
-        for text in page.get_by_role("option").all_inner_texts()
-        if text.lower().startswith("openai")
-    )
-    page.get_by_role("option", name=option, exact=True).click()
-    page.get_by_label("API key", exact=True).fill("fixture-replacement-credential")
-    page.get_by_role("button", name="More options", exact=True).click()
-    page.get_by_label("Connection name", exact=True).fill("fault-original")
-    page.get_by_label("Default model", exact=True).fill("fixture-model-new")
+    fill_replacement(page, "fixture-replacement-credential")
 
     armed = runtime.root / "host-a/fail-save-and-cleanup"
     armed.write_text("fixture only")
@@ -111,12 +115,17 @@ def check(page: Page, runtime: FaultRuntime, recordings: Path) -> dict[str, obje
     expect(page.get_by_test_id("agent-provider-row-fault-original")).to_be_visible()
     assert config_path.read_bytes() == before_config
     armed.unlink()
-    recovered = action(runtime, "fixture-recovered-credential")
-    assert recovered.status_code == 200, recovered.text
+    fill_replacement(page, "fixture-recovered-credential")
+    with page.expect_response(f"**/v1/hosts/{HOST_IDS[0]}/setup/actions") as recovery_info:
+        page.get_by_role("button", name="Save provider", exact=True).click()
+    recovered = recovery_info.value
+    assert recovered.status == 200, recovered.text()
+    expect(page.get_by_text("Added fault-original", exact=True)).to_be_visible()
+    expect(page.get_by_role("alert")).to_have_count(0)
     final_entry = yaml.safe_load(config_path.read_text())["providers"]["fault-original"]
     final_ref = final_entry["openai"]["api_key_ref"]
     assert final_ref != old_ref
-    assert final_entry["openai"]["models"]["default"] == "fixture-model"
+    assert final_entry["openai"]["models"]["default"] == "fixture-model-new"
     final_secrets = secrets(runtime)
     assert old_slot not in final_secrets
     assert final_secrets[final_ref.removeprefix("keychain:")] == "fixture-recovered-credential"
@@ -132,6 +141,7 @@ def check(page: Page, runtime: FaultRuntime, recordings: Path) -> dict[str, obje
         "original_config_and_credential_retained": True,
         "one_disposable_orphan_after_cleanup_failure": True,
         "recovery_saved_and_reloaded": True,
+        "recovery_saved_through_browser": True,
     }
 
 
