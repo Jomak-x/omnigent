@@ -412,17 +412,23 @@ support Providers.
 
 CLI readiness warnings take precedence over saved-connection counts. If an agent
 shows **Update needed**, update its CLI on the selected computer, then use
-**Check setup status**; guided sign-in is disabled while the CLI is outdated.
+**Check status**; guided sign-in is disabled while the CLI is outdated.
 
 Opening Providers only reads setup metadata. **Find credentials on this computer**
 (**Detect credentials** in Advanced provider tools) explicitly looks for existing
-credentials and checks model catalogs; **Check setup status** runs the selected
+credentials and checks model catalogs; **Check status** runs the selected
 agent's CLI setup checks and may request access to stored credentials.
 For Pi, **Check Pi default** explicitly reads local CLI configuration when a
 compatible default needs detection. **Use Pi’s local configuration** saves routing
 to Pi without checking its sign-in.
 Configured connections and saved keys do not prove vendor authentication.
-Interactive sign-in runs in the embedded guided terminal on the selected host.
+Sign-in uses the embedded guided terminal on the selected host when an
+interactive step is needed. **Sign in to Antigravity** first checks whether that
+computer is already signed in and can show **Connected** without opening a
+terminal. During interactive Antigravity sign-in, finish the vendor step and
+choose **Check connection**; an unverified check leaves the terminal running
+so you can retry. While setup is running, conflicting actions are disabled;
+the **Return to Antigravity** banner brings you back from another agent.
 For a remote host, a vendor redirect to `localhost` reaches your browser's
 computer: use the vendor's device-code/remote flow, or a browser on that host.
 

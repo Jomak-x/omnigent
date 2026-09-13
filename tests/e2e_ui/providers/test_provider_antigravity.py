@@ -11,6 +11,7 @@ import httpx
 from playwright.sync_api import Page, expect
 
 from tests._helpers.provider_setup_terminal import ProviderSetupTerminalRuntime
+from tests.e2e_ui.providers.test_provider_guided import assert_terminal_text_painted
 
 HOST_ID = "11111111111141118111111111111111"
 
@@ -55,6 +56,8 @@ def exercise_antigravity(
     api = f"{runtime.url}/v1/hosts/{HOST_ID}/setup-operations"
     recordings.mkdir(parents=True, exist_ok=True)
     operations: list[str] = []
+    config = root / "host-a/config/config.yaml"
+    original_config = config.read_bytes()
     try:
         signed_in.write_text("fixture only\n")
         page.goto(runtime.url + "/settings/providers")
@@ -72,6 +75,7 @@ def exercise_antigravity(
         expect(page.get_by_text("Antigravity is already signed in", exact=False)).to_be_visible()
         expect(page.get_by_role("region", name="Provider setup terminal")).to_have_count(0)
         assert not _rows(log) and not _rows(root / "terminal-fixture-sockets.jsonl")
+        assert config.read_bytes() == original_config
         page.screenshot(path=str(recordings / "preflight-already-signed-in.png"), full_page=True)
 
         signed_in.unlink()
@@ -95,6 +99,7 @@ def exercise_antigravity(
         pid = next(row["pid"] for row in _rows(log) if row["event"] == "agy_started")
         socket = _socket_for(runtime, operation_id)
         assert socket.exists() and _child_alive(pid)
+        assert_terminal_text_painted(terminal)
         page.screenshot(path=str(recordings / "interactive-running.png"), full_page=True)
 
         refused = httpx.post(f"{api}/{operation_id}/verify", timeout=10)
@@ -110,6 +115,8 @@ def exercise_antigravity(
         expect(page.get_by_text("Antigravity connection in progress.")).to_be_visible()
         page.get_by_test_id("setup-agent-codex").click()
         expect(page.get_by_role("button", name="Return to Antigravity")).to_be_visible()
+        expect(page.get_by_role("button", name="ChatGPT subscription", exact=True)).to_be_disabled()
+        page.screenshot(path=str(recordings / "active-operation-navigation.png"), full_page=True)
         page.get_by_role("button", name="Return to Antigravity").click()
         terminal = page.get_by_role("region", name="Provider setup terminal")
         expect(terminal).to_have_attribute("data-operation-id", operation_id)
@@ -130,6 +137,14 @@ def exercise_antigravity(
         _wait_for(lambda: not socket.exists() and not _child_alive(pid))
         assert _rows(log)[-1]["value"] == "fixture-signin"
         page.screenshot(path=str(recordings / "verified.png"), full_page=True)
+        terminal.get_by_role("button", name="View output", exact=True).click()
+        assert_terminal_text_painted(terminal)
+        page.screenshot(path=str(recordings / "retained-output.png"), full_page=True)
+        page.get_by_role("button", name="Back to agents").click()
+        page.get_by_test_id("setup-agent-codex").click()
+        expect(page.get_by_role("button", name="ChatGPT subscription", exact=True)).to_be_enabled()
+        expect(page.get_by_role("button", name="Return to Antigravity")).to_have_count(0)
+        assert config.read_bytes() == original_config
 
         page.reload()
         _select_antigravity(page)
@@ -174,6 +189,9 @@ def exercise_antigravity(
             "result": "passed",
             "dummy_only": True,
             "preflight_already_connected_without_terminal": True,
+            "configuration_unchanged": True,
+            "rendered_prompt_and_retained_output_visible": True,
+            "conflicting_controls_disabled_then_reenabled": True,
             "signed_out_interactive_cli": True,
             "false_verify_status": refused.status_code,
             "false_verify_kept_operation_running": True,

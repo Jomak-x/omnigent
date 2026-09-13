@@ -184,7 +184,13 @@ def test_guided_prompt_reload_reconnect_and_scoped_cleanup(
         terminal = page.get_by_role("region", name="Provider setup terminal")
         expect(terminal).to_have_attribute("data-operation-state", "running", timeout=20000)
         terminal.scroll_into_view_if_needed()
-        expect(terminal.get_by_text("a vendor redirect to localhost", exact=False)).to_be_visible()
+        remote_help = terminal.get_by_text("a localhost redirect opens", exact=False)
+        expect(remote_help).to_be_hidden()
+        terminal.get_by_text("Sign-in help", exact=True).click()
+        expect(remote_help).to_be_visible()
+        expect(remote_help).to_contain_text("Use device-code sign-in when available")
+        page.screenshot(path=str(RECORD / "remote-sign-in-help.png"))
+        terminal.get_by_text("Sign-in help", exact=True).click()
         page.wait_for_function(
             "window.fixtureOutput.includes('Device code: TEST-1234')", timeout=20000
         )

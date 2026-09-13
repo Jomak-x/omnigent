@@ -1,9 +1,9 @@
 """Host-owned interactive setup operations for the Providers settings UI.
 
-The browser chooses from a closed action set. The host resolves every executable
-and argv locally, owns the tmux process, and exposes only typed lifecycle
-metadata. Authentication terminal bytes are forwarded live and are never stored
-in an operation snapshot or application log.
+The browser chooses from a closed action set. When interactive setup is needed,
+the host resolves the executable and argv locally and owns the tmux process.
+Operation snapshots expose only typed lifecycle metadata. Authentication terminal
+bytes are forwarded live and never stored in a snapshot or application log.
 """
 
 from __future__ import annotations
