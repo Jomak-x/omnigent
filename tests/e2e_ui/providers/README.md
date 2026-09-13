@@ -40,6 +40,14 @@ replacing `run.py` above and choosing fresh state and recording paths:
   sanitized error, unchanged original configuration/credential, the disclosed
   leftover staged slot, and recovery through a subsequent browser save and
   reload.
+- `run_readiness.py` checks outdated and missing Codex installations with saved
+  connections, plus explicit discovery of a catalog without chat models. Host A runs only a
+  controlled dummy `codex --version`; host B has no Codex executable. A
+  nonexecuted tmux placeholder lets the real operation manager advertise sign-in
+  on A, while the browser must still block it and show update guidance. The
+  catalog fixture supplies an image-only model to the production catalog helpers.
+  No host HTTP responses are intercepted. The journey requires a visible,
+  nonblank model before saving, then checks reload and the CLI config loader.
 - `run_guided.py` additionally requires `--tmux /absolute/path/to/reviewed/tmux`.
   It runs a dummy vendor command in a real tmux terminal, checks rendered prompt
   pixels, reconnect without input replay, completion and scoped cancellation,
@@ -50,14 +58,36 @@ replacing `run.py` above and choosing fresh state and recording paths:
 These runners stop their fixture processes when the journey finishes. No vendor
 login is attempted; recorded device codes and terminal prompts are fake.
 
+To reproduce the focused readiness journey after building the SPA:
+
+```sh
+env -i PATH=/usr/bin:/bin LANG=en_US.UTF-8 PYTHONDONTWRITEBYTECODE=1 \
+  OMNIGENT_DISABLE_KEYRING=1 \
+  PYTHON_KEYRING_BACKEND=keyring.backends.null.Keyring \
+  .venv/bin/python tests/e2e_ui/providers/run_readiness.py \
+  --state "$PWD/.provider-readiness-state" \
+  --recordings "$PWD/.provider-readiness-recordings"
+```
+
+Use a fresh state directory each time. Inspect the recorded overview and detail
+images: A must show **Update needed** and a disabled **ChatGPT subscription**
+button; B must show **Installation needed** despite saved connections. The model
+image must show **Default model** outside **More options**, with save disabled
+for whitespace input. `proof.json` records persistence and host isolation checks.
+This proves the local host/API/browser behavior for controlled CLI and catalog
+conditions; it does not prove vendor login, installation, or a live vendor catalog.
+
 All application children boot through the helper's fail-closed guard. Their
 environment is built from scratch; `HOME` and `CODEX_HOME` are never repurposed.
 The guard blocks Keychain calls, ambient home access, non-fixture sockets, and
 subprocesses other than the exact Python runner and SDK harness commands. The
 guided fixture additionally allows its reviewed tmux binary and dummy pane
-program on private fixture sockets.
+program on private fixture sockets. The readiness fixture additionally permits
+only its exact dummy Codex executable with `--version`; sign-in and tmux execution
+remain blocked.
 Configuration, credentials, data, and workspaces are disposable. Model-catalog
-lookup is disabled. CLI installation/readiness and credential discovery are
+lookup is disabled; the readiness journey uses a local image-only catalog input.
+CLI installation/readiness and credential discovery are
 controlled fixtures; this test does not prove a vendor CLI login or installation.
 
 For native Electron, the checkout also needs the dependencies under

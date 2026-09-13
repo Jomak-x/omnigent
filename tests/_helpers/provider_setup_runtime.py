@@ -39,6 +39,9 @@ def install_guards() -> None:
     def terminal_permitted(command: Any, env: Any, executable: Any) -> bool:
         return False
 
+    def readiness_permitted(command: Any, env: Any, executable: Any) -> bool:
+        return False
+
     def guard(event: str, args: tuple[Any, ...]) -> None:
         if event == "socket.connect":
             address = args[1]
@@ -75,6 +78,8 @@ def install_guards() -> None:
                     == {"--harness", "--module", "--socket", "--conversation-id", "--parent-pid"}
                 )
             if not permitted and terminal_permitted(command, args[3], args[0]):
+                return
+            if not permitted and readiness_permitted(command, args[3], args[0]):
                 return
             if not permitted:
                 raise RuntimeError("Provider fixture blocked unapproved subprocess")
@@ -175,12 +180,14 @@ def install_guards() -> None:
     ambient.codex_config_detection = lambda: None
     from omnigent.onboarding import providers
 
+    real_default_chat_model = providers.default_chat_model
     providers.default_chat_model = lambda *args, **kwargs: "fixture-model-no-vendor"
     import omnigent.onboarding.copilot_auth as copilot_auth
 
     copilot_auth.gh_cli_github_token = lambda *args, **kwargs: None
     import omnigent.onboarding.harness_install as harness_install
 
+    real_harness_cli_installed = harness_install.harness_cli_installed
     harness_install.harness_cli_installed = lambda key, **kwargs: (
         key in {"anthropic", "openai", "pi"}
     )
@@ -209,6 +216,14 @@ def install_guards() -> None:
 
     HostProcess._probed_codex_model_options = no_catalog
     HostProcess._probed_claude_model_options = no_catalog
+
+    if os.environ.get("PROVIDER_FIXTURE_READINESS") == "1":
+        import runpy
+
+        module = runpy.run_path(str(Path(__file__).with_name("provider_setup_readiness.py")))
+        readiness_permitted = module["install"](
+            root, Path(sys.executable), real_harness_cli_installed, real_default_chat_model
+        )
 
     if os.environ.get("PROVIDER_FIXTURE_TERMINAL") == "1":
         import runpy
