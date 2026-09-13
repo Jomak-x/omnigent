@@ -609,3 +609,190 @@ async def test_cancelled_stop_caller_retains_native_cancellation_before_later_tu
 
     assert side_effects == ["escape", "boundary", "later-turn"]
     assert "later turn" in _ordered_user_texts(harness_client.posted_bodies[0])
+
+
+@pytest.mark.asyncio
+async def test_history_loading_message_waits_for_antigravity_stop_boundary(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from omnigent.harnesses.antigravity_native import bridge
+    from omnigent.harnesses.claude_native import bridge as relay_bridge
+    from omnigent.inner import antigravity_native_executor as executor_mod
+    from omnigent.runner.native import interrupt as interrupt_mod
+
+    monkeypatch.setattr(runner_app, "_launch_native_terminal", AsyncMock(return_value=False))
+    monkeypatch.setattr("omnigent.spec.parser.discover_host_skills", lambda *_args: [])
+    monkeypatch.setattr(relay_bridge, "start_tool_relay", lambda **_kwargs: Mock())
+    monkeypatch.setattr(relay_bridge, "post_tools_changed", lambda *_args: None)
+    monkeypatch.setattr(
+        interrupt_mod, "_session_labels_for_runner_spawn", AsyncMock(return_value={})
+    )
+
+    session_id = "antigravity-history-stop"
+    cascade_id = "c8f1b40b-03bd-4dc4-886a-dd406eeec926"
+    monkeypatch.setattr(bridge, "_BRIDGE_ROOT", tmp_path / "agy-bridges")
+    bridge_dir = bridge.bridge_dir_for_bridge_id(session_id)
+    bridge.write_bridge_state(
+        bridge_dir,
+        bridge.AntigravityNativeBridgeState(
+            session_id=session_id, conversation_id=cascade_id
+        ),
+    )
+    bridge.write_tmux_target(
+        bridge_dir, socket_path=tmp_path / "tmux.sock", tmux_target="main"
+    )
+
+    worker_started = asyncio.Event()
+    release_worker = threading.Event()
+    boundary_started = asyncio.Event()
+    release_boundary = threading.Event()
+    side_effects: list[str] = []
+    loop = asyncio.get_running_loop()
+
+    def _blocked_escape(*_args: Any, **_kwargs: Any) -> bool:
+        loop.call_soon_threadsafe(worker_started.set)
+        if not release_worker.wait(timeout=5):
+            raise RuntimeError("test native cancellation worker was not released")
+        side_effects.append("escape")
+        return True
+
+    def _record_boundary(*_args: Any, **_kwargs: Any) -> bool:
+        loop.call_soon_threadsafe(boundary_started.set)
+        if not release_boundary.wait(timeout=5):
+            raise RuntimeError("test boundary worker was not released")
+        side_effects.append("boundary")
+        return True
+
+    monkeypatch.setattr(executor_mod, "turn_is_idle_via_tui", lambda _bridge: False)
+    monkeypatch.setattr(executor_mod, "resolve_language_server_port", lambda _cascade: None)
+    monkeypatch.setattr(executor_mod, "interrupt_turn_via_tui", _blocked_escape)
+    monkeypatch.setattr(executor_mod, "wait_for_turn_idle_via_tui", lambda _bridge: True)
+    monkeypatch.setattr(
+        executor_mod, "_record_confirmed_interruption_if_current", _record_boundary
+    )
+
+    dispatched_user_texts: list[list[str]] = []
+
+    class _HistoryServerClient(NullServerClient):
+        def __init__(self) -> None:
+            self.history_started = asyncio.Event()
+            self.release_history = asyncio.Event()
+            self.history_requests = 0
+
+        async def get(self, url: str, **kwargs: Any) -> NullServerClient._Response:
+            params = kwargs.get("params")
+            if (
+                url == f"/v1/sessions/{session_id}/items"
+                and params == {"limit": "100", "order": "asc"}
+            ):
+                self.history_requests += 1
+                self.history_started.set()
+                await self.release_history.wait()
+            return await super().get(url, **kwargs)
+
+    class _DispatchHarnessClient(_ScriptedHarnessClient):
+        def stream(self, *args: Any, **kwargs: Any) -> Any:
+            side_effects.append("dispatch")
+            dispatched_user_texts.append(_ordered_user_texts(kwargs["json"]))
+            return super().stream(*args, **kwargs)
+
+    class _NoLiveInterruptProcessManager(_FakeProcessManager):
+        async def get_client(
+            self, conversation_id: str, harness: str, env: Any = None
+        ) -> _ScriptedHarnessClient:
+            if harness == "any":
+                raise NoLiveHarnessError(f"no live harness for {conversation_id}")
+            return await super().get_client(conversation_id, harness, env)
+
+    harness_client = _DispatchHarnessClient([])
+    server_client = _HistoryServerClient()
+    process_manager = _NoLiveInterruptProcessManager(harness_client)
+
+    async def _resolver(agent_id: str, resolved_session_id: str | None = None) -> AgentSpec:
+        del agent_id, resolved_session_id
+        return _antigravity_spec()
+
+    app = create_runner_app(
+        process_manager=process_manager,  # type: ignore[arg-type]
+        spec_resolver=_resolver,
+        server_client=server_client,  # type: ignore[arg-type]
+    )
+    first_request: asyncio.Task[Any] | None = None
+    stop_request: asyncio.Task[Any] | None = None
+    try:
+        async with _runner_client(app) as client:
+            created = await client.post(
+                "/v1/sessions", json={"session_id": session_id, "agent_id": "antigravity"}
+            )
+            assert created.status_code == 201, created.text
+            assert session_id not in runner_app._session_histories_ref
+            assert session_id not in app.state.active_turns
+
+            first_request = asyncio.create_task(
+                client.post(
+                    f"/v1/sessions/{session_id}/events",
+                    json={
+                        "type": "message",
+                        "content": [{"type": "input_text", "text": "first web message"}],
+                    },
+                )
+            )
+            await asyncio.wait_for(server_client.history_started.wait(), timeout=3)
+
+            stop_request = asyncio.create_task(
+                client.post(f"/v1/sessions/{session_id}/events", json={"type": "interrupt"})
+            )
+            await asyncio.wait_for(worker_started.wait(), timeout=3)
+            server_client.release_history.set()
+
+            first = await first_request
+            assert first.status_code == 202, first.text
+            assert first.json()["status"] == "buffered"
+            second = await client.post(
+                f"/v1/sessions/{session_id}/events",
+                json={
+                    "type": "message",
+                    "content": [{"type": "input_text", "text": "second web message"}],
+                },
+            )
+            assert second.status_code == 202, second.text
+            assert second.json()["status"] == "buffered"
+            assert server_client.history_requests == 1
+            assert runner_app._session_histories_ref[session_id] == []
+            assert [
+                body["content"][0]["text"]
+                for body in app.state.session_message_buffers[session_id]
+            ] == [
+                "first web message",
+                "second web message",
+            ]
+            assert harness_client.posted_bodies == []
+            assert side_effects == []
+
+            release_worker.set()
+            await asyncio.wait_for(boundary_started.wait(), timeout=3)
+            assert harness_client.posted_bodies == []
+            assert side_effects == ["escape"]
+
+            release_boundary.set()
+            stopped = await stop_request
+            assert stopped.status_code == 204, stopped.text
+            await _wait_until(lambda: len(harness_client.posted_bodies) == 2)
+    finally:
+        server_client.release_history.set()
+        release_worker.set()
+        release_boundary.set()
+        await asyncio.gather(
+            *(task for task in (first_request, stop_request) if task is not None),
+            return_exceptions=True,
+        )
+        runner_app._session_histories_ref.pop(session_id, None)
+        app.state.session_message_buffers.pop(session_id, None)
+        runner_app._session_inboxes_ref.pop(session_id, None)
+        runner_app._session_event_queues_ref.pop(session_id, None)
+
+    assert side_effects == ["escape", "boundary", "dispatch", "dispatch"]
+    assert dispatched_user_texts == [
+        ["first web message"],
+        ["first web message", "second web message"],
+    ]

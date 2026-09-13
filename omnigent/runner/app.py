@@ -9044,17 +9044,27 @@ def create_runner_app(
                     "role": message_body.get("role", "user"),
                     "content": message_body.get("content", []),
                 }
-                if conversation_id in _session_histories:
-                    _session_histories[conversation_id].append(new_item)
-                else:
+                if conversation_id not in _session_histories:
                     persisted_item_id = message_body.get("persisted_item_id")
                     loaded = await _load_history_as_input(
                         conversation_id,
                         drop_item_id=persisted_item_id,
                     )
-                    loaded.append(new_item)
                     _session_histories[conversation_id] = loaded
 
+                if conversation_id in _antigravity_pending_stops:
+                    _session_message_buffers.setdefault(conversation_id, []).append(
+                        message_body
+                    )
+                    return JSONResponse(
+                        status_code=202,
+                        content={
+                            "status": "buffered",
+                            "detail": "Message buffered; active turn will process it.",
+                        },
+                    )
+
+                _session_histories[conversation_id].append(new_item)
                 _begin_turn_slot(conversation_id)
                 _logger.info(
                     "post_session_events: starting background turn conv=%s",
