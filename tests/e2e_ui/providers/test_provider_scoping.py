@@ -212,7 +212,7 @@ def test_agent_scopes_defaults_detection_and_gateway_validation(
     expect(page.get_by_test_id("agent-provider-row-fixture-secondary")).to_be_visible()
     expect(page.get_by_test_id("agent-provider-row-claude-subscription")).to_have_count(0)
     expect(page.get_by_test_id("agent-provider-row-codex-subscription")).to_have_count(0)
-    page.get_by_role("button", name="Pi subscription", exact=True).click()
+    page.get_by_role("button", name="Use Pi’s local configuration", exact=True).click()
     pi_row = page.get_by_test_id("agent-provider-row-pi-subscription")
     expect(pi_row.get_by_text("Used for new sessions", exact=True)).to_be_visible()
     assert _config(runtime)["providers"]["pi-subscription"]["default"] == "pi"

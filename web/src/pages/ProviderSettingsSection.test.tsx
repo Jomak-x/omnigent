@@ -280,6 +280,24 @@ describe("ProviderSettingsSection", () => {
     expect(sessionStorage.getItem("omnigent:provider-setup-operation:mac")).toBe("op-1");
   });
 
+  it("blocks sign-in for an outdated CLI even when an operation is advertised", async () => {
+    hosts = [
+      { ...online("mac", "Mac"), configured_harnesses: { "codex-native": "version-too-low" } },
+    ];
+    inventories.set("mac", inventory({ supported_operations: ["codex-login"] }));
+    renderSection();
+
+    await openAgent("codex");
+    expect(screen.getByText("Update Codex")).toBeInTheDocument();
+    expect(
+      screen.getByText(/Update Codex on Mac, then check setup status again/),
+    ).toBeInTheDocument();
+    const signIn = screen.getByRole("button", { name: "ChatGPT subscription" });
+    expect(signIn).toBeDisabled();
+    fireEvent.click(signIn);
+    expect(startSetupOperationMock).not.toHaveBeenCalled();
+  });
+
   it("offers Pi's existing gateway and scopes Databricks to Pi across reload", async () => {
     hosts = [online("mac")];
     inventories.set("mac", inventory({ supported_operations: ["databricks-configure"] }));
@@ -374,7 +392,19 @@ describe("ProviderSettingsSection", () => {
     expect(screen.queryByText("Saved connections")).toBeNull();
     expect(screen.queryByText("Used for new sessions")).toBeNull();
     expect(screen.queryByRole("button", { name: /Use for new Pi sessions/ })).toBeNull();
-    expect(screen.getByRole("button", { name: "Pi subscription" })).toBeInTheDocument();
+    const localConfiguration = screen.getByRole("button", {
+      name: "Use Pi’s local configuration",
+    });
+    expect(localConfiguration).toBeInTheDocument();
+    expect(screen.getByText(/does not check your Pi sign-in/)).toBeInTheDocument();
+    fireEvent.click(localConfiguration);
+    await waitFor(() =>
+      expect(runSetupActionMock).toHaveBeenCalledWith("mac", {
+        action: "subscription",
+        cli: "pi",
+      }),
+    );
+    expect(startSetupOperationMock).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole("button", { name: "Back to agents" }));
     await openAgent("claude");
@@ -795,6 +825,39 @@ describe("ProviderSettingsSection", () => {
     expect(await screen.findByText(`${label} · mac`)).toBeInTheDocument();
   });
 
+  it.each([
+    ["binary-missing", "Installation needed"],
+    ["version-too-low", "Update needed"],
+  ] as const)(
+    "prioritizes %s readiness over a saved Codex connection",
+    async (availability, label) => {
+      hosts = [{ ...online("mac"), configured_harnesses: { "codex-native": availability } }];
+      inventories.set(
+        "mac",
+        inventory({
+          providers: [
+            {
+              name: "openai-key",
+              kind: "key",
+              families: ["openai"],
+              defaults: [],
+              default_scopes: ["openai"],
+              credential_sources: {},
+              models: {},
+              base_urls: {},
+            },
+          ],
+          supported_operations: [],
+        }),
+      );
+      renderSection();
+
+      const codex = await screen.findByTestId("setup-agent-codex");
+      expect(codex).toHaveTextContent(label);
+      expect(codex).not.toHaveTextContent("saved connection");
+    },
+  );
+
   it("discards checked readiness when setup changes or a guided sign-in starts", async () => {
     hosts = [online("mac")];
     inventories.set(
@@ -1133,6 +1196,45 @@ describe("ProviderSettingsSection", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /add provider/i }));
     expect(screen.getByLabelText("API key")).toHaveValue("");
+  });
+
+  it("requires a model immediately when an explicit catalog check reports none", async () => {
+    hosts = [online("mac")];
+    inventories.set("mac", inventory());
+    detectSetupMock.mockResolvedValue({
+      providers: [],
+      imports: [],
+      models: {},
+      default_models: { openai: null },
+    });
+    renderSection();
+
+    await openAgent("codex");
+    fireEvent.click(screen.getByRole("button", { name: "Find credentials on this computer" }));
+    await screen.findByText("No additional credentials were found.");
+    fireEvent.click(screen.getByRole("button", { name: "API key" }));
+    expect(
+      screen.getByText("This vendor has no catalog default on this computer."),
+    ).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("API key"), { target: { value: "test-only-key" } });
+    const save = screen.getByRole("button", { name: "Save provider" });
+    expect(save).toBeDisabled();
+    fireEvent.change(screen.getByPlaceholderText("Required for this vendor"), {
+      target: { value: "gpt-5.6" },
+    });
+    expect(save).toBeEnabled();
+    fireEvent.click(save);
+
+    await waitFor(() =>
+      expect(runSetupActionMock).toHaveBeenCalledWith("mac", {
+        action: "add_key",
+        provider: "openai",
+        name: undefined,
+        model: "gpt-5.6",
+        secret: "test-only-key",
+      }),
+    );
   });
 
   it("sends gateway families, models, selected protocol, and credential payload", async () => {

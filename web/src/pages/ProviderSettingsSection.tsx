@@ -1170,7 +1170,11 @@ function KeyProviderForm({
   const [secret, setSecret] = useState("");
   const [envVar, setEnvVar] = useState("");
   const [more, setMore] = useState(false);
-  const valid = provider && (secret.trim() || envVar.trim());
+  // Model discovery is opt-in because it can inspect local configuration. When
+  // the user has explicitly checked and the catalog has no default, require a
+  // model here instead of failing after the credential is submitted.
+  const requiresModel = Object.hasOwn(defaultModels, provider) && !defaultModels[provider];
+  const valid = provider && (secret.trim() || envVar.trim()) && (!requiresModel || model.trim());
   if (catalog.length === 0) {
     return (
       <p className="text-sm text-muted-foreground">
@@ -1232,6 +1236,20 @@ function KeyProviderForm({
           />
         </label>
       </div>
+      {requiresModel && (
+        <label className="flex flex-col gap-1 text-sm font-medium">
+          Default model
+          <Input
+            required
+            value={model}
+            onChange={(event) => setModel(event.target.value)}
+            placeholder="Required for this vendor"
+          />
+          <span className="text-xs font-normal text-muted-foreground">
+            This vendor has no catalog default on this computer.
+          </span>
+        </label>
+      )}
       <button
         type="button"
         className="self-start text-sm text-muted-foreground hover:text-foreground"
@@ -1250,14 +1268,16 @@ function KeyProviderForm({
               placeholder="Optional"
             />
           </label>
-          <label className="flex flex-col gap-1 text-sm font-medium">
-            Default model
-            <Input
-              value={model}
-              onChange={(event) => setModel(event.target.value)}
-              placeholder="Automatic (omni setup default)"
-            />
-          </label>
+          {!requiresModel && (
+            <label className="flex flex-col gap-1 text-sm font-medium">
+              Default model
+              <Input
+                value={model}
+                onChange={(event) => setModel(event.target.value)}
+                placeholder="Optional — uses the catalog default when blank"
+              />
+            </label>
+          )}
           <label className="flex flex-col gap-1 text-sm font-medium">
             Environment variable instead of key
             <Input
@@ -1656,9 +1676,8 @@ function AgentSettings({
     ? (checkedStatuses[agent.harness]?.availability ?? host.configured_harnesses?.[agent.harness])
     : undefined;
   const availableLogin = !!agent?.login && operationAvailable(inventory, agent.login);
-  const needsInstall =
-    !availableLogin &&
-    (readiness === false || readiness === "binary-missing" || readiness === "version-too-low");
+  const needsUpdate = readiness === "version-too-low";
+  const needsInstall = !availableLogin && (readiness === false || readiness === "binary-missing");
   const canInstall = agent && harnessInstallableOnHost(info, agent.harness, host);
   const chooseAgent = (id: string | null) => {
     setMethod(null);
@@ -1671,17 +1690,17 @@ function AgentSettings({
     if (checked) return checkedSetupStatusLabel(checked.availability);
     const itemReadiness = host.configured_harnesses?.[item.harness];
     if (itemReadiness === true) return "Available on this computer";
+    if (itemReadiness === "version-too-low") return "Update needed";
+    if (
+      (itemReadiness === false || itemReadiness === "binary-missing") &&
+      !(item.login && operationAvailable(inventory, item.login))
+    )
+      return "Installation needed";
+    if (itemReadiness === "needs-auth") return "Sign-in needed";
     const count = inventory.providers.filter((provider) =>
       providerMatchesAgent(provider, item),
     ).length;
     if (count) return `${count} saved connection${count === 1 ? "" : "s"}`;
-    if (
-      itemReadiness === false ||
-      itemReadiness === "binary-missing" ||
-      itemReadiness === "version-too-low"
-    )
-      return "Installation needed";
-    if (itemReadiness === "needs-auth") return "Sign-in needed";
     if (item.login && itemReadiness === undefined) return "Sign-in status not checked";
     if (item.login && operationAvailable(inventory, item.login)) return "Sign-in available";
     return "Choose how to connect";
@@ -1824,17 +1843,23 @@ function AgentSettings({
         )}
         {statusError && <InlineError message={statusError} />}
       </div>
-      {needsInstall && (
+      {(needsInstall || needsUpdate) && (
         <div className="flex flex-wrap items-center justify-between gap-3 border-b bg-muted/30 px-4 py-3">
           <div>
-            <p className="text-sm font-medium">Install {agent.label}</p>
+            <p className="text-sm font-medium">
+              {needsUpdate ? `Update ${agent.label}` : `Install ${agent.label}`}
+            </p>
             <p className="text-xs text-muted-foreground">
-              {installStep?.detail ??
-                `${agent.label} must be installed on ${host.name} before sign-in.`}
-              {!canInstall && " Install it on this computer, then check setup status again."}
+              {needsUpdate
+                ? `Update ${agent.label} on ${host.name}, then check setup status again.`
+                : (installStep?.detail ??
+                  `${agent.label} must be installed on ${host.name} before sign-in.`)}
+              {!needsUpdate &&
+                !canInstall &&
+                " Install it on this computer, then check setup status again."}
             </p>
           </div>
-          {canInstall && canMutate && (
+          {!needsUpdate && canInstall && canMutate && (
             <Button
               type="button"
               size="sm"
@@ -2005,7 +2030,7 @@ function AgentSettings({
                 type="button"
                 size="sm"
                 variant="outline"
-                disabled={busy || !availableLogin || needsInstall}
+                disabled={busy || !availableLogin || needsInstall || needsUpdate}
                 onClick={() => void onStart(agent.login!)}
               >
                 <TerminalIcon className="size-4" />{" "}
@@ -2028,15 +2053,20 @@ function AgentSettings({
               </p>
             )}
             {agent.id === "pi" && (
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                disabled={busy || needsInstall}
-                onClick={() => void onAction({ action: "subscription", cli: "pi" })}
-              >
-                Pi subscription
-              </Button>
+              <div className="flex flex-col gap-1">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  disabled={busy || needsInstall}
+                  onClick={() => void onAction({ action: "subscription", cli: "pi" })}
+                >
+                  Use Pi’s local configuration
+                </Button>
+                <p className="text-xs text-muted-foreground">
+                  Saves local routing to Pi; it does not check your Pi sign-in.
+                </p>
+              </div>
             )}
             {(agent.id === "claude" || agent.id === "codex" || agent.id === "pi") && (
               <Button
@@ -2127,7 +2157,7 @@ function AgentSettings({
                   catalog={inventory.key_providers.filter((item) =>
                     agent.surfaces.includes(item.family as ProviderSurface),
                   )}
-                  defaultModels={{}}
+                  defaultModels={detection?.default_models ?? {}}
                   busy={busy}
                   onAction={onAction}
                   onDone={() => setMethod(null)}
