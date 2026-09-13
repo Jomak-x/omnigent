@@ -1726,7 +1726,11 @@ describe("Composer shared visible controls", () => {
     const actions = screen.getByTestId("composer-action-row");
     expect(textarea().parentElement?.parentElement).toBe(card);
     expect(actions.parentElement).toBe(card);
-    expect(actions.children).toHaveLength(2);
+    const [widthProbe, leading, trailing] = Array.from(actions.children);
+    expect(widthProbe).toHaveClass("h-0");
+    expect(leading).toContainElement(screen.getByRole("button", { name: "Add" }));
+    expect(trailing).toContainElement(screen.getByTestId("composer-config-gear"));
+    expect(actions.children).toHaveLength(3);
     expect(workspace).toHaveClass("mx-3", "h-[37px]", "rounded-t-2xl");
     // The branch text now flows through the shared ComposerWorkspaceStatus +
     // useComposerGitStatus (covered by their own tests); here assert the shared
@@ -3063,7 +3067,7 @@ describe("Composer config gear", () => {
     expect(tip.textContent).toContain("Model:");
     expect(tip.textContent).toContain("Effort:");
     // Effort is switchable in-session; permission mode is not, so it must be absent.
-    expect(tip.textContent).not.toContain("Permissions");
+    expect(tip.textContent).not.toContain("Permission mode");
   });
 
   it("reflects Smart Routing in the Model row of the summary when routing is on", async () => {
@@ -3417,10 +3421,7 @@ describe("Composer config gear", () => {
     // while Luna's own max stays.
     await waitFor(() => expect(useChatStore.getState().setEffort).toHaveBeenCalledWith(null));
     act(() => useChatStore.setState({ llmModel: "gpt-5.6-luna", selectedEffort: null }));
-    expect(screen.getByTestId("composer-agent-effort-default")).toHaveAttribute(
-      "aria-checked",
-      "true",
-    );
+    expect(screen.queryByTestId("composer-agent-effort-default")).toBeNull();
     expect(document.querySelector('[data-testid="composer-agent-effort-ultra"]')).toBeNull();
     expect(document.querySelector('[data-testid="composer-agent-effort-max"]')).not.toBeNull();
   });
