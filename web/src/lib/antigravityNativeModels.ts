@@ -27,7 +27,7 @@ function splitEffortSuffix(id: string): { familyId: string; effort: AntigravityE
   const suffix = id.slice(id.lastIndexOf("-") + 1).toLowerCase();
   if (!AGY_EFFORTS.includes(suffix as AntigravityEffort)) return null;
   const familyId = id.slice(0, -(suffix.length + 1));
-  return familyId ? { familyId, effort: suffix as AntigravityEffort } : null;
+  return familyId.startsWith("gemini-") ? { familyId, effort: suffix as AntigravityEffort } : null;
 }
 
 function groupLabel(option: NativeModelOption, effort: AntigravityEffort): string {

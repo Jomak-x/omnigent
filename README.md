@@ -424,9 +424,12 @@ where the harness supports it.
 
 For a new native Antigravity task in the web or desktop UI, open Antigravity's
 **Edit** control in the agent picker and choose a **Model** before starting.
-Choices come from `agy models` on the selected host; leaving **Default** selected
-lets agy choose. Omnigent does not offer an active-session model switch or a
-reasoning-effort control for this harness. For delegated workers, see
+Choices come from `agy models` on the selected host; **Harness default** sends no
+model override and lets agy choose. When the catalog advertises two or more Gemini
+siblings ending in `-low`, `-medium`, or `-high`, the **Effort** picker selects an
+exact advertised model ID; it does not send a separate `reasoning_effort` value.
+Other models remain standalone choices. Omnigent does not offer an active-session
+model switch for this harness. For delegated workers, see
 [native Antigravity model selection](docs/AGENT_YAML_SPEC.md#native-antigravity).
 
 <details>

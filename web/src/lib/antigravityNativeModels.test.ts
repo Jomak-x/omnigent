@@ -19,6 +19,30 @@ const LIVE_AGY_MODELS: NativeModelOption[] = [
 ];
 
 describe("antigravityModelGroups", () => {
+  it.each(["claude-sonnet-4-6", "gpt-oss-120b", "other-gemini-model"])(
+    "keeps advertised %s effort siblings as standalone exact model choices",
+    (familyId) => {
+      const options: NativeModelOption[] = ["low", "medium", "high"].map((effort) => ({
+        id: `${familyId}-${effort}`,
+        displayName: `${familyId} ${effort}`,
+        isDefault: effort === "medium",
+      }));
+      const groups = antigravityModelGroups(options);
+
+      expect(groups).toEqual(
+        options.map((option) => ({
+          ...option,
+          source: undefined,
+          defaultModelId: option.id,
+          efforts: [],
+        })),
+      );
+      for (const option of options) {
+        expect(antigravityModelGroupForModel(groups, option.id)?.defaultModelId).toBe(option.id);
+      }
+    },
+  );
+
   it("derives effort choices only from actual sibling launch ids", () => {
     const groups = antigravityModelGroups(LIVE_AGY_MODELS);
 
