@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -182,6 +183,74 @@ async def test_antigravity_interrupt_failure_does_not_acknowledge_active_turn(
     assert resp is not None and resp.status_code == 503
     assert json.loads(bytes(resp.body))["error"] == "antigravity_native_interrupt_failed"
     assert captured["wakes"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("event_type", ["interrupt", "stop"])
+@pytest.mark.parametrize("transport", ["rpc", "tui", "idle"])
+@pytest.mark.parametrize("confirmation_error", [False, True])
+async def test_antigravity_unconfirmed_cancel_returns_503_without_parent_wake(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    event_type: str,
+    transport: str,
+    confirmation_error: bool,
+) -> None:
+    import omnigent.harnesses.antigravity_native.bridge as bridge
+    import omnigent.inner.antigravity_native_executor as executor
+    from omnigent.harnesses.antigravity_native.stop_hook import STOP_EVENTS_FILE
+    from omnigent.runner.native import interrupt as interrupt_mod
+
+    bridge.write_bridge_state(
+        tmp_path,
+        bridge.AntigravityNativeBridgeState(
+            session_id="conv_agy", conversation_id="active-cascade"
+        ),
+    )
+
+    async def _labels(
+        *, server_client: Any, session_id: str, raise_on_error: bool
+    ) -> dict[str, str]:
+        return {}
+
+    calls: list[str] = []
+    idle = False
+
+    def _confirm_idle(_bridge: Path) -> bool:
+        if not idle and confirmation_error:
+            raise RuntimeError("private pane transport detail")
+        return idle
+
+    monkeypatch.setattr(interrupt_mod, "_session_labels_for_runner_spawn", _labels)
+    monkeypatch.setattr(bridge, "bridge_dir_for_bridge_id", lambda _bridge_id: tmp_path)
+    monkeypatch.setattr(executor, "turn_is_idle_via_tui", lambda _bridge: transport == "idle")
+    monkeypatch.setattr(executor, "wait_for_turn_idle_via_tui", _confirm_idle)
+    monkeypatch.setattr(
+        executor, "resolve_language_server_port", lambda _cid: 43210 if transport == "rpc" else None
+    )
+    monkeypatch.setattr(
+        executor, "cancel_cascade_steps", lambda _port, _cid: calls.append("rpc") or True
+    )
+    monkeypatch.setattr(
+        executor, "interrupt_turn_via_tui", lambda _bridge: calls.append("tui") or True
+    )
+    runner, captured = _make_runner()
+    response = await getattr(runner, event_type)("antigravity-native", "conv_agy")
+
+    assert response is not None and response.status_code == 503
+    assert json.loads(bytes(response.body)) == {
+        "error": "antigravity_native_interrupt_failed",
+        "detail": "Antigravity cancellation could not be confirmed.",
+    }
+    assert calls == ([] if transport == "idle" else [transport])
+    assert captured["wakes"] == []
+    assert not (tmp_path / STOP_EVENTS_FILE).exists()
+
+    idle = True
+    response = await getattr(runner, event_type)("antigravity-native", "conv_agy")
+    assert response is not None and response.status_code == 204
+    assert calls == ([] if transport == "idle" else [transport, transport])
+    assert captured["wakes"] == [("conv_agy", "cancelled", "[System: sub-agent interrupted]")]
 
 
 @pytest.mark.asyncio

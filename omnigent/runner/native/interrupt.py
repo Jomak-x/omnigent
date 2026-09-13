@@ -525,7 +525,7 @@ class NativeInterruptRunner:
                     status_code=503,
                     content={
                         "error": "antigravity_native_interrupt_failed",
-                        "detail": "No active Antigravity turn accepted cancellation.",
+                        "detail": "Antigravity cancellation could not be confirmed.",
                     },
                 )
             return Response(status_code=204)

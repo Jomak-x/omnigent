@@ -138,7 +138,7 @@ async def test_events_cancel_antigravity_native_without_inprocess_turn(
         "interrupt_turn_via_tui",
         lambda bridge_dir: pytest.fail("validated RPC should take precedence over TUI Escape"),
     )
-    monkeypatch.setattr(agy_executor, "wait_for_turn_idle_via_tui", lambda bridge_dir: False)
+    monkeypatch.setattr(agy_executor, "wait_for_turn_idle_via_tui", lambda bridge_dir: True)
 
     async with _runner_client(app) as client:
         created = await client.post(

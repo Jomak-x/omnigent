@@ -168,8 +168,8 @@ class AntigravityNativeExecutor(Executor):
 
         :param session_key: Adapter session key. Unused; the native bridge is
             per conversation.
-        :returns: ``True`` when either cancel transport accepted the request;
-            ``False`` when the bridge is inactive or neither transport is ready.
+        :returns: ``True`` after native idle is confirmed; ``False`` when the
+            bridge is inactive or cancellation cannot be confirmed.
         """
         del session_key
         async with self._send_lock:
@@ -303,8 +303,7 @@ async def interrupt_bridge_turn(
     if state is None or not _session_is_active(state.session_id, expected_session_id):
         return False
     if await asyncio.to_thread(turn_is_idle_via_tui, bridge_dir):
-        await _record_confirmed_interruption(bridge_dir)
-        return True
+        return await _record_confirmed_interruption(bridge_dir)
     cascade_id = state.conversation_id
     if not is_placeholder_conversation_id(cascade_id):
         port = await asyncio.to_thread(resolve_language_server_port, cascade_id)
@@ -315,8 +314,7 @@ async def interrupt_bridge_turn(
                     "antigravity native interrupt via CancelCascadeSteps: conversation=%s",
                     cascade_id,
                 )
-                await _record_confirmed_interruption(bridge_dir)
-                return True
+                return await _record_confirmed_interruption(bridge_dir)
     try:
         cancelled = await asyncio.to_thread(interrupt_turn_via_tui, bridge_dir)
     except RuntimeError as exc:
@@ -324,19 +322,19 @@ async def interrupt_bridge_turn(
         return False
     if cancelled:
         _logger.info("antigravity native interrupt via TUI Escape: session=%s", state.session_id)
-        await _record_confirmed_interruption(bridge_dir)
-    return cancelled
+        return await _record_confirmed_interruption(bridge_dir)
+    return False
 
 
-async def _record_confirmed_interruption(bridge_dir: Path) -> None:
+async def _record_confirmed_interruption(bridge_dir: Path) -> bool:
     """Close a canceled transcript turn after agy's TUI confirms it is idle."""
     try:
         idle = await asyncio.to_thread(wait_for_turn_idle_via_tui, bridge_dir)
         if not idle:
-            return
+            return False
         binding = await asyncio.to_thread(resolve_owned_transcript, bridge_dir)
         if binding is None:
-            return
+            return True
         await asyncio.to_thread(
             record_stop_event,
             bridge_dir,
@@ -346,8 +344,10 @@ async def _record_confirmed_interruption(bridge_dir: Path) -> None:
                 "terminationReason": "USER_CANCELED",
             },
         )
+        return True
     except (OSError, RuntimeError) as exc:
         _logger.warning("antigravity native interrupt completion not recorded: %s", exc)
+        return False
 
 
 def _bridge_dir_from_env() -> Path:

@@ -902,6 +902,11 @@ async def _supervise_transcript(
             ):
                 marker = _stop_from_hook_event(event)
                 if marker.boundary is not None:
+                    if (
+                        baseline_identity == marker.boundary[:2]
+                        and marker.boundary[2] <= baseline_offset
+                    ):
+                        continue
                     if marker.boundary in seen_stop_boundaries:
                         continue
                     seen_stop_boundaries.add(marker.boundary)

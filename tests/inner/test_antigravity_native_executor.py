@@ -443,6 +443,7 @@ def test_interrupt_session_cancels_and_returns_true(
 
     monkeypatch.setattr(executor_mod, "resolve_language_server_port", _resolve_port)
     monkeypatch.setattr(executor_mod, "cancel_cascade_steps", _cancel)
+    monkeypatch.setattr(executor_mod, "wait_for_turn_idle_via_tui", lambda _bridge: True)
     result = asyncio.run(_executor(tmp_path).interrupt_session("main"))
     assert result is True
     assert seen["resolved_for"] == _CONVERSATION_ID
@@ -532,6 +533,7 @@ def test_interrupt_uses_tui_when_rpc_is_unavailable(
         return True
 
     monkeypatch.setattr(executor_mod, "interrupt_turn_via_tui", interrupt)
+    monkeypatch.setattr(executor_mod, "wait_for_turn_idle_via_tui", lambda _bridge: True)
     assert asyncio.run(_executor(tmp_path).interrupt_session("main")) is True
     assert calls == [tmp_path]
 

@@ -284,6 +284,96 @@ async def test_two_transcript_turns_mirror_once_and_close_on_stop(
 
 
 @pytest.mark.asyncio
+async def test_resume_ignores_stop_at_same_file_baseline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bridge_dir = tmp_path / "bridge"
+    transcript_path, _ = _session_files(bridge_dir)
+    transcript_path.write_text(
+        _step(0, "USER_EXPLICIT", "USER_INPUT", "<USER_REQUEST>before resume</USER_REQUEST>")
+        + _step(1, "MODEL", "PLANNER_RESPONSE", "before resume answer")
+    )
+    transcript.prepare_transcript_capture(bridge_dir)
+    baseline_offset, baseline_identity = transcript.initial_tail_state(bridge_dir, CONVERSATION_ID)
+    assert baseline_identity is not None
+    write_bridge_state(
+        bridge_dir,
+        AntigravityNativeBridgeState(session_id="session-one", conversation_id=CONVERSATION_ID),
+    )
+    monkeypatch.setattr(executor_mod, "turn_is_idle_via_tui", lambda _bridge: True)
+    monkeypatch.setattr(executor_mod, "wait_for_turn_idle_via_tui", lambda _bridge: True)
+    assert await executor_mod.interrupt_bridge_turn(bridge_dir, expected_session_id="session-one")
+    stale_stop = json.loads((bridge_dir / STOP_EVENTS_FILE).read_text())
+    assert stale_stop["cancelled"] is True
+    assert stale_stop["transcript_boundary"] == [*baseline_identity, baseline_offset]
+    with transcript_path.open("a", encoding="utf-8") as handle:
+        handle.write(
+            _step(2, "USER_EXPLICIT", "USER_INPUT", "<USER_REQUEST>first</USER_REQUEST>")
+            + _step(3, "MODEL", "PLANNER_RESPONSE", "first answer")
+        )
+    events: list[reader.OutboundEvent] = []
+    ticks = 0
+
+    async def post(_client: object, _session_id: str, event: reader.OutboundEvent) -> bool:
+        events.append(event)
+        return True
+
+    async def sleep(_duration: float) -> None:
+        nonlocal ticks
+        ticks += 1
+        if ticks == 1:
+            assert [
+                event.data["status"]
+                for event in events
+                if event.event_type == "external_session_status"
+            ] == ["running"]
+            record_stop_event(bridge_dir, {"conversationId": CONVERSATION_ID, "fullyIdle": True})
+        if ticks == 2:
+            assert [
+                event.data["status"]
+                for event in events
+                if event.event_type == "external_session_status"
+            ] == ["running", "idle"]
+            with transcript_path.open("a", encoding="utf-8") as handle:
+                handle.write(
+                    _step(
+                        4,
+                        "USER_EXPLICIT",
+                        "USER_INPUT",
+                        "<USER_REQUEST>second</USER_REQUEST>",
+                    )
+                    + _step(5, "MODEL", "PLANNER_RESPONSE", "second answer")
+                )
+        if ticks == 3:
+            assert [
+                event.data["status"]
+                for event in events
+                if event.event_type == "external_session_status"
+            ] == ["running", "idle", "running"]
+            record_stop_event(bridge_dir, {"conversationId": CONVERSATION_ID, "fullyIdle": True})
+
+    monkeypatch.setattr(reader, "_post_event", post)
+    monkeypatch.setattr(reader, "_sleep", sleep)
+    await reader._supervise_transcript(
+        bridge_dir,
+        transcript.TranscriptBinding(CONVERSATION_ID, transcript_path),
+        "session-one",
+        client=object(),  # type: ignore[arg-type]
+        poll_interval_s=0,
+        stop=lambda: ticks >= 5,
+        committed_steps_out=None,
+    )
+    assert [
+        event.data["status"] for event in events if event.event_type == "external_session_status"
+    ] == ["running", "idle", "running", "idle"]
+    assert [
+        event.data["item_data"]["content"][0]["text"]
+        for event in events
+        if event.event_type == "external_conversation_item"
+    ] == ["first", "first answer", "second", "second answer"]
+
+
+@pytest.mark.asyncio
 async def test_batched_stop_markers_close_each_turn_after_its_answer(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
