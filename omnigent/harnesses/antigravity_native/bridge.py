@@ -1829,8 +1829,17 @@ def _interrupt_owner_is_current(
     state = read_bridge_state(bridge_dir)
     if state is None or state.session_id != expected_session_id:
         return False
-    return expected_cascade_id is None or cascade_is_current(
-        expected_cascade_id, state.conversation_id
+    if expected_cascade_id is None:
+        return True
+    if not cascade_is_current(expected_cascade_id, state.conversation_id):
+        return False
+    from omnigent.harnesses.antigravity_native.transcript import resolve_owned_transcript
+
+    binding = resolve_owned_transcript(bridge_dir)
+    if binding is None:
+        return is_placeholder_conversation_id(expected_cascade_id)
+    return cascade_is_current(expected_cascade_id, binding.conversation_id) and cascade_is_current(
+        state.conversation_id, binding.conversation_id
     )
 
 

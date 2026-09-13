@@ -1780,9 +1780,7 @@ const MainAgentSurface = memo(function MainAgentSurfaceImpl({
             spacerMeasureRef={spacerMeasureRef}
           />
           {showAntigravityTranscriptFallbackNotice && (
-            <AntigravityTranscriptFallbackNotice
-              terminalAvailable={terminalFirst?.terminalsAvailable === true}
-            />
+            <AntigravityTranscriptFallbackNotice />
           )}
           {/* Floating reply button — scoped to the conversation container. */}
           <SelectionPopup

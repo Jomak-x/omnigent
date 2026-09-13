@@ -23,9 +23,17 @@ from tests.server.helpers import create_test_agent
 pytestmark = pytest.mark.asyncio
 
 
-async def _create_session(client: httpx.AsyncClient, name: str) -> str:
+async def _create_session(
+    client: httpx.AsyncClient,
+    name: str,
+    *,
+    labels: dict[str, str] | None = None,
+) -> str:
     agent = await create_test_agent(client, name=name)
-    resp = await client.post("/v1/sessions", json={"agent_id": agent["id"]})
+    payload: dict[str, object] = {"agent_id": agent["id"]}
+    if labels is not None:
+        payload["labels"] = labels
+    resp = await client.post("/v1/sessions", json=payload)
     assert resp.status_code == 201, resp.text
     return resp.json()["id"]
 
@@ -80,7 +88,11 @@ async def test_reposted_item_with_source_id_persists_once(
 async def test_transcript_reader_restart_dedupes_items_and_preserves_next_pending_input(
     client: httpx.AsyncClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    session_id = await _create_session(client, "agy-transcript-restart")
+    session_id = await _create_session(
+        client,
+        "agy-transcript-restart",
+        labels={"omnigent.wrapper": "antigravity-native-ui"},
+    )
     bridge_dir = tmp_path / "bridge"
     conversation_id = "8bb3c819-e505-4812-b0f6-895bd2ec1f98"
     app_dir = bridge_dir / "agy-home" / ".gemini" / "antigravity-cli"
@@ -161,6 +173,50 @@ async def test_transcript_reader_restart_dedupes_items_and_preserves_next_pendin
     assert all(
         entry["pending_id"] != pending_id for entry in pending_inputs.snapshot_for(session_id)
     )
+
+
+async def test_antigravity_native_steering_does_not_consume_queued_web_input(
+    client: httpx.AsyncClient,
+) -> None:
+    session_id = await _create_session(
+        client,
+        "agy-native-steering-pending-input",
+        labels={"omnigent.wrapper": "antigravity-native-ui"},
+    )
+    pending_id = pending_inputs.record(
+        session_id,
+        [
+            {"type": "input_image", "file_id": "file_web", "filename": "web.png"},
+            {"type": "input_text", "text": "queued\nΔ input"},
+        ],
+        created_by="web@example.com",
+    )
+
+    await _post_item(
+        client,
+        session_id,
+        text="queued Δ input",
+        source_id="agy-transcript:cascade:user:1:native",
+    )
+    steering = (await client.get(f"/v1/sessions/{session_id}/items")).json()["data"][0]
+    assert steering["content"] == [{"type": "input_text", "text": "queued Δ input"}]
+    assert "created_by" not in steering
+    assert [entry["pending_id"] for entry in pending_inputs.snapshot_for(session_id)] == [pending_id]
+
+    await _post_item(
+        client,
+        session_id,
+        text="queued\nΔ input",
+        source_id="agy-transcript:cascade:user:2:web",
+    )
+    items = (await client.get(f"/v1/sessions/{session_id}/items")).json()["data"]
+    web_input = items[1]
+    assert web_input["content"] == [
+        {"type": "input_image", "file_id": "file_web", "filename": "web.png"},
+        {"type": "input_text", "text": "queued\nΔ input"},
+    ]
+    assert web_input["created_by"] == "web@example.com"
+    assert pending_inputs.snapshot_for(session_id) == []
 
 
 async def test_distinct_source_ids_persist_separately(

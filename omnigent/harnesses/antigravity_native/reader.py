@@ -690,7 +690,9 @@ def _status_event(status: str) -> OutboundEvent:
     )
 
 
-def _transcript_stop_status(failed: bool, *, boundary_missing: bool = False) -> OutboundEvent:
+def _transcript_stop_status(
+    failed: bool, *, cancelled: bool = False, boundary_missing: bool = False
+) -> OutboundEvent:
     event = _status_event(_STATUS_FAILED if failed or boundary_missing else _STATUS_IDLE)
     if failed or boundary_missing:
         return OutboundEvent(
@@ -709,12 +711,19 @@ def _transcript_stop_status(failed: bool, *, boundary_missing: bool = False) -> 
             },
             step_index=event.step_index,
         )
+    if cancelled:
+        return OutboundEvent(
+            event_type=event.event_type,
+            data={**event.data, "cancelled": True},
+            step_index=event.step_index,
+        )
     return event
 
 
 @dataclass(frozen=True)
 class _TranscriptStop:
     failed: bool
+    cancelled: bool
     boundary: tuple[int, int, int] | None
 
 
@@ -727,7 +736,11 @@ def _stop_from_hook_event(event: dict[str, object]) -> _TranscriptStop:
         and all(isinstance(part, int) and not isinstance(part, bool) and part >= 0 for part in raw)
         else None
     )
-    return _TranscriptStop(failed=event.get("failed") is True, boundary=boundary)
+    return _TranscriptStop(
+        failed=event.get("failed") is True,
+        cancelled=event.get("cancelled") is True,
+        boundary=boundary,
+    )
 
 
 async def _post_event(
@@ -958,6 +971,7 @@ async def _supervise_transcript(
                             session_id,
                             _transcript_stop_status(
                                 marker.failed,
+                                cancelled=marker.cancelled,
                                 boundary_missing=(
                                     marker.boundary is None
                                     or step_tail.identity != marker.boundary[:2]
@@ -1041,6 +1055,7 @@ async def _supervise_transcript(
                     session_id,
                     _transcript_stop_status(
                         marker.failed,
+                        cancelled=marker.cancelled,
                         boundary_missing=(
                             marker.boundary is None or step_tail.identity != marker.boundary[:2]
                         ),

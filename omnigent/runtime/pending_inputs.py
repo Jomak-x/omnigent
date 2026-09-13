@@ -337,7 +337,13 @@ def restore(conversation_id: str, drained: DrainedInput) -> None:
         _pending[conversation_id] = {drained.pending_id: entry, **entries}
 
 
-def resolve_matching_text(conversation_id: str, text: str) -> MatchedDrain:
+def resolve_matching_text(
+    conversation_id: str,
+    text: str,
+    *,
+    discard_before_match: bool = True,
+    normalize_text: bool = True,
+) -> MatchedDrain:
     """
     Drain through the first pending entry whose text matches ``text``.
 
@@ -350,10 +356,16 @@ def resolve_matching_text(conversation_id: str, text: str) -> MatchedDrain:
 
     :param conversation_id: Conversation/session id, e.g. ``"conv_abc123"``.
     :param text: Accepted prompt text mirrored from Kiro's structured JSONL.
+    :param discard_before_match: Whether entries before the matched prompt are
+        also drained. Kiro treats them as failed injections; transcript readers
+        with independently typed prompts leave them queued.
+    :param normalize_text: Whether whitespace is normalized before comparing.
+        Kiro's structured prompt text is normalized; transcript readers that
+        preserve committed user text compare it exactly.
     :returns: Matched entry plus older skipped entries, or no match with an
         empty skipped list when the text was typed directly in the TUI.
     """
-    needle = _normalize_text(text)
+    needle = _normalize_text(text) if normalize_text else text
     if not needle:
         return MatchedDrain(matched=None, skipped=[])
     with _lock:
@@ -364,7 +376,9 @@ def resolve_matching_text(conversation_id: str, text: str) -> MatchedDrain:
         ordered = list(entries.items())
         match_index: int | None = None
         for index, (_pending_id, entry) in enumerate(ordered):
-            entry_text = _normalize_text(_content_text(entry.content))
+            entry_text = _content_text(entry.content)
+            if normalize_text:
+                entry_text = _normalize_text(entry_text)
             # Exact match only: an unanchored suffix check ("noyes".endswith("yes"))
             # can pick an unrelated queued entry whenever its text happens to trail
             # a different accepted prompt, handing that entry's file attachments to
@@ -375,9 +389,12 @@ def resolve_matching_text(conversation_id: str, text: str) -> MatchedDrain:
                 break
         if match_index is None:
             return MatchedDrain(matched=None, skipped=[])
-        skipped_entries = ordered[:match_index]
+        skipped_entries = ordered[:match_index] if discard_before_match else []
         _matched_id, matched_entry = ordered[match_index]
-        for pending_id, _entry in ordered[: match_index + 1]:
+        consumed_entries = (
+            ordered[: match_index + 1] if discard_before_match else [ordered[match_index]]
+        )
+        for pending_id, _entry in consumed_entries:
             entries.pop(pending_id, None)
         if not entries:
             _pending.pop(conversation_id, None)

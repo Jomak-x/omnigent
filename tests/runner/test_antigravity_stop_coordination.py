@@ -68,8 +68,9 @@ class _QuiescenceHarnessClient(_ScriptedHarnessClient):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("recovery", ["retry", "idle", "failed"])
 async def test_stop_failure_keeps_child_pending_until_live_harness_confirms(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, recovery: str
 ) -> None:
     """A failed native confirmation cannot terminalize or drain a child turn."""
     from omnigent.harnesses.antigravity_native import bridge
@@ -161,15 +162,33 @@ async def test_stop_failure_keeps_child_pending_until_live_harness_confirms(
                 and event.get("status") in {"idle", "failed"}
             ]
 
-            harness_client.confirmed = True
+            assert harness_client.posted_bodies == []
+            if recovery == "retry":
+                harness_client.confirmed = True
+                completion_body = {"type": "interrupt"}
+            else:
+                completion_body = {
+                    "type": "external_session_status",
+                    "data": {"status": recovery, "output": "native result"},
+                }
             confirmed = await client.post(
-                f"/v1/sessions/{child_id}/events", json={"type": "interrupt"}
+                f"/v1/sessions/{child_id}/events", json=completion_body
             )
 
             assert confirmed.status_code == 204, confirmed.text
             await _wait_until(lambda: bool(harness_client.posted_bodies))
             await _wait_until(lambda: not parent_inbox.empty())
             delivered = parent_inbox.get_nowait()
+            await _wait_until(lambda: child_id not in app.state.active_turns)
+            fresh = await client.post(
+                f"/v1/sessions/{child_id}/events",
+                json={
+                    "type": "message",
+                    "content": [{"type": "input_text", "text": "fresh message"}],
+                },
+            )
+            assert fresh.status_code == 202, fresh.text
+            await _wait_until(lambda: len(harness_client.posted_bodies) == 2)
     finally:
         blocker.set()
         runner_app.unregister_subagent_work(child_id)
@@ -177,7 +196,7 @@ async def test_stop_failure_keeps_child_pending_until_live_harness_confirms(
         runner_app._session_inboxes_ref.pop(child_id, None)
         runner_app._session_event_queues_ref.pop(child_id, None)
 
-    assert harness_client.interrupt_posts == 2
+    assert harness_client.interrupt_posts == (2 if recovery == "retry" else 1)
     assert direct_native_calls == []
     dispatched_texts = [
         block.get("text")
@@ -188,11 +207,93 @@ async def test_stop_failure_keeps_child_pending_until_live_harness_confirms(
         if isinstance(block, dict)
     ]
     assert "buffered follow-up" in dispatched_texts
-    assert delivered["status"] == "cancelled"
+    assert "fresh message" in dispatched_texts
+    assert delivered["status"] == {
+        "retry": "cancelled",
+        "idle": "completed",
+        "failed": "failed",
+    }[recovery]
     assert any(
         url == f"/v1/sessions/{parent_id}/events" and payload.get("type") == "message"
         for url, payload in server_client.posts
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reader_first", [True, False])
+async def test_cancelled_native_status_and_interrupt_wake_parent_once(
+    monkeypatch: pytest.MonkeyPatch, reader_first: bool
+) -> None:
+    child_id = "antigravity-cancelled-child"
+    parent_id = "antigravity-cancelled-parent"
+    harness_client = _QuiescenceHarnessClient()
+    server_client = _WakeServerClient()
+
+    async def _resolver(*_args: Any, **_kwargs: Any) -> AgentSpec:
+        return _antigravity_spec()
+
+    app = create_runner_app(
+        process_manager=_FakeProcessManager(harness_client),  # type: ignore[arg-type]
+        spec_resolver=_resolver,
+        server_client=server_client,  # type: ignore[arg-type]
+    )
+    parent_inbox: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+    runner_app._session_inboxes_ref[parent_id] = parent_inbox
+    runner_app.register_subagent_work(
+        parent_session_id=parent_id,
+        child_session_id=child_id,
+        agent="antigravity",
+        title="reply",
+    )
+    terminal_body = {
+        "type": "external_session_status",
+        "data": {"status": "idle", "cancelled": True, "output": "partial reply"},
+    }
+    try:
+        async with _runner_client(app) as client:
+            created = await client.post(
+                "/v1/sessions", json={"session_id": child_id, "agent_id": "antigravity"}
+            )
+            assert created.status_code == 201, created.text
+            server_client.posts.clear()
+
+            async def _interrupt(*_args: Any, **_kwargs: Any) -> Response:
+                if reader_first:
+                    observed = await client.post(
+                        f"/v1/sessions/{child_id}/events", json=terminal_body
+                    )
+                    assert observed.status_code == 204, observed.text
+                return Response(status_code=204)
+
+            monkeypatch.setattr(harness_client, "post", _interrupt)
+            stopped = await client.post(
+                f"/v1/sessions/{child_id}/events", json={"type": "interrupt"}
+            )
+            assert stopped.status_code == 204, stopped.text
+            observed = await client.post(
+                f"/v1/sessions/{child_id}/events", json=terminal_body
+            )
+            assert observed.status_code == 204, observed.text
+            await _wait_until(lambda: not parent_inbox.empty())
+            assert parent_inbox.get_nowait()["status"] == "cancelled"
+            assert parent_inbox.empty()
+            await _wait_until(lambda: bool(server_client.posts))
+            assert (
+                len(
+                    [
+                        payload
+                        for url, payload in server_client.posts
+                        if url == f"/v1/sessions/{parent_id}/events"
+                        and payload.get("type") == "message"
+                    ]
+                )
+                == 1
+            )
+    finally:
+        runner_app.unregister_subagent_work(child_id)
+        runner_app._session_inboxes_ref.pop(parent_id, None)
+        runner_app._session_inboxes_ref.pop(child_id, None)
+        runner_app._session_event_queues_ref.pop(child_id, None)
 
 
 @pytest.mark.asyncio

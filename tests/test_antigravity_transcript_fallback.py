@@ -731,6 +731,46 @@ async def test_failed_stop_exposes_safe_error_output(
 
 
 @pytest.mark.asyncio
+async def test_cancelled_stop_keeps_cancelled_terminal_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bridge_dir = tmp_path / "bridge"
+    transcript_path, _ = _session_files(bridge_dir)
+    transcript_path.write_text(
+        _step(0, "USER_EXPLICIT", "USER_INPUT", "<USER_REQUEST>cancel me</USER_REQUEST>")
+    )
+    record_stop_event(
+        bridge_dir,
+        {
+            "conversationId": CONVERSATION_ID,
+            "fullyIdle": True,
+            "terminationReason": "USER_CANCELED",
+        },
+    )
+    events: list[reader.OutboundEvent] = []
+
+    async def post(_client: object, _session_id: str, event: reader.OutboundEvent) -> bool:
+        events.append(event)
+        return True
+
+    monkeypatch.setattr(reader, "_post_event", post)
+    monkeypatch.setattr(reader, "_sleep", lambda _duration: _noop())
+    await reader._supervise_transcript(
+        bridge_dir,
+        transcript.TranscriptBinding(CONVERSATION_ID, transcript_path),
+        "session-one",
+        client=object(),  # type: ignore[arg-type]
+        poll_interval_s=0,
+        stop=_stop_after_polls(2),
+        committed_steps_out=None,
+    )
+    status_events = [
+        event.data for event in events if event.event_type == "external_session_status"
+    ]
+    assert status_events == [{"status": "running"}, {"status": "idle", "cancelled": True}]
+
+
+@pytest.mark.asyncio
 async def test_failed_stop_does_not_block_following_successful_turn(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -843,6 +883,10 @@ async def test_confirmed_interrupt_without_native_stop_closes_and_allows_next_tu
     assert [
         event.data["status"] for event in events if event.event_type == "external_session_status"
     ] == ["running", "idle", "running", "idle"]
+    status_events = [
+        event.data for event in events if event.event_type == "external_session_status"
+    ]
+    assert status_events[1] == {"status": "idle", "cancelled": True}
     assert [
         event.data["item_data"]["content"][0]["text"]
         for event in events
