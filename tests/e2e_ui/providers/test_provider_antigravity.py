@@ -115,7 +115,9 @@ def exercise_antigravity(
         expect(page.get_by_text("Antigravity connection in progress.")).to_be_visible()
         page.get_by_test_id("setup-agent-codex").click()
         expect(page.get_by_role("button", name="Return to Antigravity")).to_be_visible()
-        expect(page.get_by_role("button", name="ChatGPT subscription", exact=True)).to_be_disabled()
+        expect(
+            page.get_by_role("button", name="ChatGPT subscription", exact=True)
+        ).to_be_disabled()
         page.screenshot(path=str(recordings / "active-operation-navigation.png"), full_page=True)
         page.get_by_role("button", name="Return to Antigravity").click()
         terminal = page.get_by_role("region", name="Provider setup terminal")
