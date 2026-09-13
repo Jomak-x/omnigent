@@ -15,6 +15,7 @@ def main() -> None:
     parser.add_argument("--state", type=Path, required=True)
     parser.add_argument("--recordings", type=Path, required=True)
     parser.add_argument("--tmux", type=Path, required=True)
+    parser.add_argument("--timeout-test", action="store_true")
     args = parser.parse_args()
     if os.environ.get("OMNIGENT_DISABLE_KEYRING") != "1":
         parser.error("Run with OMNIGENT_DISABLE_KEYRING=1 and a clean environment")
@@ -37,7 +38,9 @@ def main() -> None:
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    runtime = module.ProviderSetupTerminalRuntime(args.state, checkout, tmux=args.tmux)
+    runtime = module.ProviderSetupTerminalRuntime(
+        args.state, checkout, tmux=args.tmux, timeout_test=args.timeout_test
+    )
     args.recordings.mkdir(parents=True, exist_ok=True)
     try:
         runtime.start()
@@ -50,9 +53,12 @@ def main() -> None:
             )
             page = context.new_page()
             try:
-                module.test_guided_prompt_reload_reconnect_and_scoped_cleanup(
-                    page, runtime, args.recordings
-                )
+                if args.timeout_test:
+                    module.exercise_guided_timeout(page, runtime, args.recordings)
+                else:
+                    module.test_guided_prompt_reload_reconnect_and_scoped_cleanup(
+                        page, runtime, args.recordings
+                    )
             finally:
                 context.close()
                 browser.close()

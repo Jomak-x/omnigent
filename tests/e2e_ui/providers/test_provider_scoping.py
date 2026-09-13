@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
+import signal
+import time
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -66,14 +69,52 @@ def _back(page: Page) -> None:
     page.get_by_role("button", name="Back to agents", exact=True).click()
 
 
+def _wait_for_host_status(runtime: ProviderSetupRuntime, host_id: str, status: str) -> None:
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        response = httpx.get(f"{runtime.url}/v1/hosts", timeout=3)
+        response.raise_for_status()
+        rows = response.json()
+        hosts = rows if isinstance(rows, list) else rows.get("hosts", [])
+        if any(row.get("host_id") == host_id and row.get("status") == status for row in hosts):
+            return
+        time.sleep(0.2)
+    raise AssertionError(f"Fixture host {host_id} did not become {status}")
+
+
 def test_agent_scopes_defaults_detection_and_gateway_validation(
-    page: Page, provider_runtime: ProviderSetupRuntime
+    page: Page, provider_runtime: ProviderSetupRuntime, recordings: Path | None = None
 ) -> None:
     runtime = provider_runtime
-    _seed_cli_subscriptions(runtime)
+    recordings = recordings or runtime.root.with_name(runtime.root.name.removesuffix("-state"))
+    recordings.mkdir(parents=True, exist_ok=True)
+    config_before = (runtime.root / "host-a/config/config.yaml").read_text()
+    writes: list[str] = []
+    page.on(
+        "request",
+        lambda request: writes.append(f"{request.method} {request.url}")
+        if request.method in {"POST", "PUT", "PATCH", "DELETE"}
+        else None,
+    )
     page.goto(runtime.url + "/settings/providers")
     page.get_by_test_id("settings-providers-host").click()
     page.get_by_role("option", name="Fixture computer A · online", exact=True).click()
+    expect(page.get_by_test_id("setup-agent-pi")).to_be_visible()
+    expect(page.get_by_role("heading", name="Agents", exact=True)).to_be_visible()
+    assert writes == []
+    assert (runtime.root / "host-a/config/config.yaml").read_text() == config_before
+    page.screenshot(path=str(recordings / "overview-light.png"), full_page=True)
+
+    page.goto(runtime.url + "/settings/appearance")
+    page.get_by_test_id("theme-dark").click()
+    expect(page.locator("html")).to_have_class("dark")
+    page.goto(runtime.url + "/settings/providers")
+    expect(page.get_by_test_id("settings-providers-host")).to_contain_text("Fixture computer A")
+    expect(page.get_by_test_id("setup-agent-pi")).to_be_visible()
+    page.screenshot(path=str(recordings / "overview-dark.png"), full_page=True)
+
+    _seed_cli_subscriptions(runtime)
+    page.reload()
     expect(page.get_by_test_id("setup-agent-pi")).to_be_visible()
 
     _agent(page, "pi")
@@ -187,3 +228,40 @@ def test_agent_scopes_defaults_detection_and_gateway_validation(
     }
     assert "default" not in saved["providers"]["pi-subscription"]
     assert "fixture-only-secret" not in json.dumps(saved)
+
+    _back(page)
+    page.get_by_role("button", name="More agents", exact=True).click()
+    antigravity = page.get_by_test_id("setup-agent-antigravity")
+    expect(antigravity).to_contain_text("Installation needed")
+    antigravity.click()
+    expect(page.get_by_text("Installation needed · Fixture computer A", exact=True)).to_be_visible()
+    expect(page.locator("body")).not_to_contain_text(CLAUDE_NOTICE)
+    with (
+        page.expect_request(f"**/v1/hosts/{HOST_IDS[0]}/setup/detect") as status_request,
+        page.expect_response(
+            lambda response: response.url.endswith(f"/v1/hosts/{HOST_IDS[0]}/setup/detect")
+            and response.request.method == "POST"
+        ) as status_response,
+    ):
+        page.get_by_role("button", name="Check setup status", exact=True).click()
+    assert status_request.value.post_data_json == {"harness": "antigravity-native"}
+    assert status_response.value.json()["harness_status"] == {
+        "harness": "antigravity-native",
+        "availability": False,
+    }
+    expect(page.get_by_text("Installation needed · Fixture computer A", exact=True)).to_be_visible()
+    expect(page.locator("body")).not_to_contain_text(CLAUDE_NOTICE)
+    page.screenshot(path=str(recordings / "antigravity-dark.png"), full_page=True)
+
+    host_a = runtime.processes[3]
+    os.killpg(host_a.pid, signal.SIGTERM)
+    _wait_for_host_status(runtime, HOST_IDS[0], "offline")
+    page.reload()
+    expect(page.get_by_test_id("settings-providers-host")).to_contain_text("Fixture computer A")
+    expect(page.get_by_role("status")).to_contain_text(
+        "Fixture computer A is offline. Its settings cannot be read or changed until it reconnects; "
+        "this selection will stay on Fixture computer A.",
+    )
+    expect(page.get_by_test_id("setup-agent-pi")).to_have_count(0)
+    expect(page.get_by_test_id("setup-agent-antigravity")).to_have_count(0)
+    page.screenshot(path=str(recordings / "selected-host-offline-dark.png"), full_page=True)

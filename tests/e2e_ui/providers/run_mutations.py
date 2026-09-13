@@ -1,4 +1,4 @@
-"""Run the guarded provider-scoping browser regression without unrelated conftests."""
+"""Run the guarded provider-mutation journey without repository-wide test loading."""
 
 from __future__ import annotations
 
@@ -29,8 +29,8 @@ def main() -> None:
     keyring.set_keyring(Keyring())
     checkout = Path(__file__).resolve().parents[3]
     sys.path.insert(0, str(checkout))
-    source = Path(__file__).with_name("test_provider_scoping.py")
-    spec = importlib.util.spec_from_file_location("provider_scoping_test", source)
+    source = Path(__file__).with_name("test_provider_mutations.py")
+    spec = importlib.util.spec_from_file_location("provider_mutations_test", source)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -47,12 +47,11 @@ def main() -> None:
             )
             page = context.new_page()
             try:
-                module.test_agent_scopes_defaults_detection_and_gateway_validation(
-                    page, runtime, args.recordings
-                )
-                page.screenshot(path=str(args.recordings / "passed.png"), full_page=True)
+                module.exercise_provider_mutations(page, runtime, args.recordings)
+                # The pre-malformed page still renders the completed mutation journey.
+                page.screenshot(path=str(args.recordings / "mutations.png"), full_page=True)
             except BaseException:
-                page.screenshot(path=str(args.recordings / "failed.png"), full_page=True)
+                page.screenshot(path=str(args.recordings / "mutation-failure.png"), full_page=True)
                 raise
             finally:
                 context.close()

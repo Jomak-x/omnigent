@@ -71,11 +71,10 @@ def store_harness_credential(
 ) -> StoreCredentialResult:
     """Write a provider credential for a harness family, non-interactively.
 
-    Stores *secret* in the secret store under a family-derived name, then writes
-    a ``providers:`` entry (``key`` or ``gateway``) referencing it as
-    ``keychain:<name>`` — never the raw secret — and makes it the family default
-    when no default is set yet. This is the prompt-free equivalent of the
-    ``omnigent setup`` "add a key / gateway" path.
+    Stores *secret* with :func:`setup_operations.store_setup_credential`, then
+    writes a ``providers:`` entry (``key`` or ``gateway``) referencing the stored
+    slot — never the raw secret. Default assignment uses the shared
+    :func:`setup_operations.provider_add_settings` rules.
 
     The secret is passed by value and handed straight to the secret store; it is
     never logged, echoed, or written to ``config.yaml``.
@@ -105,9 +104,7 @@ def store_harness_credential(
                 False, None, "a gateway base_url must start with http:// or https://"
             )
 
-    # The entry name is the family for a key (one canonical vendor key per
-    # family), or "<family>-gateway" for a gateway, so a re-add updates in place
-    # rather than piling up duplicates. Keychain slot == entry name.
+    # Stable entry names let this quick-setup form replace its prior connection.
     name = family if kind == "key" else f"{family}-gateway"
     try:
         from omnigent.onboarding.setup_operations import store_setup_credential
@@ -135,8 +132,6 @@ def store_harness_credential(
         )
 
     try:
-        # Add/update the one provider entry (deep-merge keeps siblings), then
-        # point the family default (and, when needed, Pi's own default) at it.
         from omnigent.onboarding.setup_operations import persist_provider
 
         persist_provider(name, entry)

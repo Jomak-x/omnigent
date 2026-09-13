@@ -394,7 +394,7 @@ omnigent setup
 ```
 
 Add a credential, set a default, or remove one, grouped by agent. Omnigent
-works with four kinds of credentials:
+supports credentials including:
 
 | | Kind | What it is |
 |---|---|---|
@@ -403,8 +403,31 @@ works with four kinds of credentials:
 | 🌐 | **Gateway** | Any OpenAI- or Anthropic-compatible `base_url` and key (OpenRouter, LiteLLM, Ollama, vLLM, Azure) |
 | 🧱 | **Databricks** | A Databricks workspace profile (requires the `databricks` extra) |
 
+In the browser or desktop app, open **Settings → Providers** for graphical
+setup. Select the execution computer, then an agent to manage its connections,
+defaults, and available install or sign-in actions. A sole host is selected
+automatically; with several hosts, choose one explicitly. The selection stays
+on that computer if it disconnects. Older hosts may need an update before they
+support Providers.
+
+Opening Providers only reads setup metadata. **Detect credentials** explicitly
+looks for existing credentials; **Check setup status** runs the selected
+agent's CLI setup checks and may request access to stored credentials.
+Configured connections and saved keys do not prove vendor authentication.
+Interactive sign-in runs in the embedded guided terminal on the selected host.
+For a remote host, a vendor redirect to `localhost` reaches your browser's
+computer: use the vendor's device-code/remote flow, or a browser on that host.
+
+**Advanced provider tools** exposes all connections, API-key/gateway/Bedrock
+forms, and custom ACP agents. See the [OpenClaw guide](docs/openclaw.md#import-coding-agents)
+for importing an existing ACP registry. Removing a Claude or ChatGPT
+subscription also signs out of its standalone CLI on that host.
+
 Defaults are per agent, so a Claude default and a Codex default coexist. You
 can also switch models in the middle of a session with the `/model` command.
+Changing a provider default affects subsequent process launches; it does not
+restart running agents. Resumed sessions without a pinned provider continue to
+use the CLI's normal default resolution.
 
 <details>
 <summary>Gateway base URLs (OpenRouter, Ollama)</summary>

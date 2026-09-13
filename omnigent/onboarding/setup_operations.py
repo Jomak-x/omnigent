@@ -95,6 +95,11 @@ def unique_provider_name(config: dict[str, object], candidate: str) -> str:
 def resolve_key_provider_name(
     config: dict[str, object], family: str, candidate: str, api_key_ref: str
 ) -> str:
+    """Reuse an exact source match or the candidate's UI-staged key slot.
+
+    A CLI fixed reference also replaces its same-named UI connection; otherwise
+    allocate a free name so credentials from different sources can coexist.
+    """
     same_source = existing_key_name_for_ref(config, family, api_key_ref)
     if same_source is not None:
         return same_source

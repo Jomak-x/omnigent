@@ -443,25 +443,7 @@ def _resolve_key_provider_name(  # type: ignore[explicit-any]  # config is a yam
     candidate: str,
     api_key_ref: str,
 ) -> str:
-    """Pick the entry name for an API key being added — update vs keep-both.
-
-    Realizes the "allow multiple API keys, keep both if source differs"
-    behavior: a key whose secret source (*api_key_ref*) matches an existing
-    key on *family* reuses that entry's name (an in-place update of the same
-    credential); a key from a new source takes a fresh, unique name so it
-    coexists with the others.
-
-    :param config: The parsed global config mapping (``providers:`` block).
-    :param family: The harness family the key serves, ``"anthropic"`` or
-        ``"openai"``.
-    :param candidate: The preferred name (the vendor id for a preset, or the
-        user-typed name for "Other provider"), e.g. ``"anthropic"``.
-    :param api_key_ref: The key's secret reference, e.g.
-        ``"env:ANTHROPIC_API_KEY"`` or ``"keychain:anthropic"``.
-    :returns: The existing same-source entry's name (update in place), else a
-        unique name derived from *candidate* (keep both), e.g.
-        ``"anthropic-2"``.
-    """
+    """Delegate update-versus-add naming to setup_operations.resolve_key_provider_name."""
     from omnigent.onboarding.setup_operations import resolve_key_provider_name
 
     return resolve_key_provider_name(config, family, candidate, api_key_ref)

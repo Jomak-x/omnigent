@@ -49,9 +49,18 @@ def prepare(root: Path, python: Path, tmux: Path) -> None:
 class ProviderSetupTerminalRuntime(ProviderSetupRuntime):
     """Opt-in runtime permitting only reviewed tmux and the disposable dummy CLI."""
 
-    def __init__(self, root: Path, checkout: Path, *, tmux: Path, port: int | None = None):
+    def __init__(
+        self,
+        root: Path,
+        checkout: Path,
+        *,
+        tmux: Path,
+        port: int | None = None,
+        timeout_test: bool = False,
+    ):
         super().__init__(root, checkout, port=port)
         self.tmux = tmux.resolve(strict=True)
+        self.timeout_test = timeout_test
 
     def prepare(self) -> None:
         super().prepare()
@@ -64,6 +73,7 @@ class ProviderSetupTerminalRuntime(ProviderSetupRuntime):
                 "PATH": str(self.root / "fixture-bin") + ":/usr/bin:/bin",
                 "PROVIDER_FIXTURE_TERMINAL": "1",
                 "PROVIDER_FIXTURE_TMUX": str(self.tmux),
+                "PROVIDER_FIXTURE_TIMEOUT_TEST": "1" if self.timeout_test else "0",
             }
         )
         env["OMNIGENT_RUNNER_ENV_PASSTHROUGH"] = ",".join(env)
@@ -179,6 +189,11 @@ def install(root: Path, socket_root: Path, python: Path, tmux: Path):
                 terminal_factory=create_terminal,
                 executable_resolver=resolver,
                 verifier=verify,
+                **(
+                    {"command_timeout_seconds": 3}
+                    if os.environ.get("PROVIDER_FIXTURE_TIMEOUT_TEST") == "1"
+                    else {}
+                ),
             )
         return self._manager
 

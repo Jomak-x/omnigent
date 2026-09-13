@@ -64,6 +64,67 @@ def assert_terminal_text_painted(terminal):
     raise AssertionError("Terminal prompt bytes arrived but visible text was not painted")
 
 
+def exercise_guided_timeout(
+    page: Page, runtime: ProviderSetupTerminalRuntime, recordings: Path
+) -> None:
+    """A real idle fixture child times out and releases the selected host's write guard."""
+    page.goto(runtime.url + "/settings/providers")
+    page.get_by_test_id("settings-providers-host").click()
+    page.get_by_role("option", name="Fixture computer A · online", exact=True).click()
+    page.get_by_test_id("setup-agent-codex").click()
+    page.get_by_role("button", name="ChatGPT subscription", exact=True).click()
+    terminal = page.get_by_role("region", name="Provider setup terminal")
+    expect(terminal).to_have_attribute("data-operation-state", "failed", timeout=15000)
+    expect(terminal).to_contain_text("Setup operation timed out.")
+    operation = terminal.get_attribute("data-operation-id")
+    sockets = [
+        json.loads(line)
+        for line in (runtime.root / "terminal-fixture-sockets.jsonl").read_text().splitlines()
+    ]
+    owned = next(row for row in sockets if row["operation_id"] == operation)
+    wait_for(lambda: not Path(owned["socket"]).exists())
+    rows = [
+        json.loads(line)
+        for line in (runtime.root / "terminal-fixture-inputs.jsonl").read_text().splitlines()
+    ]
+    pid = rows[0]["pid"]
+
+    def child_gone():
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        return False
+
+    wait_for(child_gone)
+    api = runtime.url + "/v1/hosts/11111111111141118111111111111111"
+    inventory = httpx.get(api + "/setup", timeout=10).json()
+    assert not any(row["kind"] == "subscription" for row in inventory["providers"])
+    response = httpx.post(
+        api + "/setup/actions",
+        json={"action": "set_default", "name": "fixture-secondary", "surface": "openai"},
+        timeout=10,
+    )
+    response.raise_for_status()
+    assert response.json()["inventory"]["effective_defaults"]["openai"] == "fixture-secondary"
+    page.screenshot(path=str(recordings / "timed-out.png"), full_page=True)
+    (recordings / "timeout-proof.json").write_text(
+        json.dumps(
+            {
+                "fixture_timeout_seconds": 3,
+                "operation_id": operation,
+                "state": "failed",
+                "error": "Setup operation timed out.",
+                "child_and_socket_removed": True,
+                "subscription_not_persisted": True,
+                "subsequent_save_status": response.status_code,
+                "new_default": "fixture-secondary",
+            },
+            indent=2,
+        )
+    )
+
+
 def test_guided_prompt_reload_reconnect_and_scoped_cleanup(
     page: Page,
     guided_runtime: ProviderSetupTerminalRuntime,
@@ -130,6 +191,34 @@ def test_guided_prompt_reload_reconnect_and_scoped_cleanup(
         terminal.scroll_into_view_if_needed()
         assert_terminal_text_painted(terminal)
         page.screenshot(path=str(RECORD / "pre-attach-prompt.png"))
+        operation_id = terminal.get_attribute("data-operation-id")
+        api = URL + "/v1/hosts/11111111111141118111111111111111"
+        rejected_requests = []
+        for payload in (
+            {"action": "codex-login", "command": "fixture-unapproved-command"},
+            {"action": "codex-login", "parameters": {"cwd": str(STATE)}},
+            {"action": "codex-login", "parameters": {"env": {"FIXTURE": "value"}}},
+        ):
+            response = httpx.post(api + "/setup-operations", json=payload, timeout=10)
+            rejected_requests.append(
+                {"payload": payload, "status": response.status_code, "response": response.json()}
+            )
+            assert response.status_code in (400, 422), rejected_requests[-1]
+        conflict = httpx.post(
+            api + "/setup-operations", json={"action": "codex-login"}, timeout=10
+        )
+        assert conflict.status_code == 409
+        blocked_save = httpx.post(
+            api + "/setup/actions",
+            json={"action": "set_default", "name": "fixture-secondary", "surface": "openai"},
+            timeout=10,
+        )
+        assert blocked_save.status_code == 409
+        wrong_host = httpx.get(
+            URL + "/v1/hosts/22222222222242228222222222222222/setup-operations/" + operation_id,
+            timeout=10,
+        )
+        assert wrong_host.status_code == 404
         terminal.locator(".xterm-helper-textarea").focus()
         page.keyboard.type("fixture-input-once")
         page.keyboard.press("Enter")
@@ -212,6 +301,12 @@ def test_guided_prompt_reload_reconnect_and_scoped_cleanup(
         assert Path(other_socket).exists()
         os.kill(other_pid, 0)
         page.screenshot(path=str(RECORD / "cancelled.png"))
+        private_markers = (b"fixture-input-once", b"Device code: TEST-1234")
+        privacy_files = [*STATE.rglob("*.log"), *STATE.glob("server/data/test.db*")]
+        assert privacy_files
+        for path in privacy_files:
+            contents = path.read_bytes()
+            assert not any(marker in contents for marker in private_markers), path
         proof = {
             "result": "passed",
             "pre_attach_prompt": True,
@@ -221,6 +316,13 @@ def test_guided_prompt_reload_reconnect_and_scoped_cleanup(
             "cancel_removed_socket": True,
             "cancel_removed_child": True,
             "other_host_socket_and_child_survived": True,
+            "arbitrary_execution_requests_rejected": rejected_requests,
+            "concurrent_operation_status": conflict.status_code,
+            "save_during_operation_status": blocked_save.status_code,
+            "other_host_cannot_observe_operation_status": wrong_host.status_code,
+            "terminal_markers_absent_from_application_logs_and_database": [
+                str(path.relative_to(STATE)) for path in privacy_files
+            ],
             "dummy_only": True,
             "operations": delayed_starts,
         }
