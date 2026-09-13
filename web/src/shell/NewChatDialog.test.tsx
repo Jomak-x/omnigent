@@ -1659,8 +1659,9 @@ describe("NewChatLandingScreen", () => {
     } as unknown as ReturnType<typeof useHostWorktrees>);
     renderLanding();
 
+    // The empty composer rests at one row: no minimum taller than the draft.
+    expect(screen.getByTestId("new-chat-landing-input")).not.toHaveClass("min-h-[42px]");
     expect(screen.getByTestId("new-chat-landing-input")).toHaveClass(
-      "min-h-[42px]",
       "max-h-[180px]",
       "overflow-y-auto",
       "p-0",
@@ -1714,7 +1715,7 @@ describe("NewChatLandingScreen", () => {
       "text-xs",
       "leading-4",
     );
-    expect(composer).toHaveClass("min-h-[105px]");
+    expect(composer).not.toHaveClass("min-h-[105px]");
     expect(composer).toContainElement(actions);
     expect(actions).toHaveClass("justify-between", "gap-2", "px-2", "pt-1", "pb-2");
     expect(actions).not.toHaveClass("mt-2");
@@ -1794,11 +1795,13 @@ describe("NewChatLandingScreen", () => {
     const card = screen.getByTestId("new-chat-landing-composer");
     expect(screen.getByTestId("new-chat-landing-input").parentElement?.parentElement).toBe(card);
     expect(actions.parentElement).toBe(card);
-    expect(Array.from(actions.children)).toEqual([leftControls, rightControls]);
+    const [widthProbe, ...groups] = Array.from(actions.children);
+    expect(widthProbe).toHaveClass("h-0");
+    expect(groups).toEqual([leftControls, rightControls]);
     expect(actions).toHaveClass("flex-nowrap");
-    expect(leftControls).toHaveClass("min-w-0", "flex-[0_1_auto]", "gap-1", "overflow-visible");
+    expect(leftControls).toHaveClass("min-w-0", "flex-none", "gap-1", "overflow-visible");
     expect(leftControls).not.toHaveClass("overflow-hidden", "shrink-0", "absolute");
-    expect(rightControls).toHaveClass("flex", "flex-[0_1_auto]", "items-center", "gap-1");
+    expect(rightControls).toHaveClass("flex", "shrink-0", "items-center", "gap-1");
     expect(rightControls).toHaveClass("ml-auto", "max-w-full");
     expect(rightControls).not.toHaveClass("flex-1");
     for (const control of [attach, hostChip, permission]) {
@@ -1865,7 +1868,7 @@ describe("NewChatLandingScreen", () => {
     ]);
     renderLanding();
     const picker = screen.getByTestId("new-chat-landing-agent-select");
-    expect(picker).toHaveAccessibleName("Claude Code, Model Opus, Effort Default");
+    expect(picker).toHaveAccessibleName("Claude Code, Model Opus");
     fireEvent.pointerDown(picker, { button: 0 });
     const summary = screen.getByTestId("new-chat-landing-agent-summary-a1");
     expect(summary).toHaveTextContent("Opus");
@@ -1889,7 +1892,7 @@ describe("NewChatLandingScreen", () => {
     const picker = screen.getByTestId("new-chat-landing-agent-select");
     expect(picker).not.toHaveTextContent("Claude Code");
     expect(picker).not.toHaveTextContent("Default");
-    expect(picker).toHaveAccessibleName("Claude Code, Model Opus 4.8, Effort Default");
+    expect(picker).toHaveAccessibleName("Claude Code, Model Opus 4.8");
     // The hover summary is a styled tooltip with bold keys, never the
     // unstyled native `title` hover.
     expect(picker).not.toHaveAttribute("title");
@@ -1897,7 +1900,7 @@ describe("NewChatLandingScreen", () => {
     const pickerTooltip = await screen.findByTestId("new-chat-landing-agent-tooltip");
     expect(pickerTooltip).toHaveTextContent("Harness: Claude Code");
     expect(pickerTooltip).toHaveTextContent("Model: Default (Opus 4.8)");
-    expect(pickerTooltip).toHaveTextContent("Effort: Default");
+    expect(pickerTooltip).not.toHaveTextContent("Effort:");
     for (const key of within(pickerTooltip).getAllByText(/^(Harness|Model|Effort):$/)) {
       expect(key).toHaveClass("font-semibold");
     }
@@ -2132,10 +2135,7 @@ describe("NewChatLandingScreen", () => {
     expect(screen.getByTestId("new-chat-landing-agent-effort-value")).toHaveTextContent("xHigh");
     expect(screen.getByTestId("new-chat-landing-agent-summary-a2")).toHaveTextContent("xHigh");
     fireEvent.click(screen.getByTestId("new-chat-landing-agent-model-databricks-gpt-5-5"));
-    expect(screen.getByTestId("new-chat-landing-agent-effort-default")).toHaveAttribute(
-      "aria-checked",
-      "true",
-    );
+    expect(screen.queryByTestId("new-chat-landing-agent-effort-default")).toBeNull();
     expect(screen.queryByTestId("new-chat-landing-agent-effort-value")).toBeNull();
     closeMenu();
     selectAgent("a1");
@@ -2438,10 +2438,10 @@ describe("NewChatLandingScreen", () => {
     expect(within(picker).getByTestId("new-chat-landing-agent-model-value")).toHaveTextContent(
       "Models unavailable",
     );
-    expect(picker).toHaveAccessibleName("Claude Code, Model Default, Effort Default");
+    expect(picker).toHaveAccessibleName("Claude Code, Model Default");
 
     selectAgent("a2");
-    expect(picker).toHaveAccessibleName("Codex, Model GPT-5.5, Effort Default");
+    expect(picker).toHaveAccessibleName("Codex, Model GPT-5.5");
     expect(within(picker).getByTestId("new-chat-landing-agent-model-value")).toHaveTextContent(
       "GPT-5.5",
     );
@@ -2457,7 +2457,7 @@ describe("NewChatLandingScreen", () => {
     selectAgent("a2");
 
     const picker = screen.getByTestId("new-chat-landing-agent-select");
-    expect(picker).toHaveAccessibleName("Codex, Model Default, Effort Default");
+    expect(picker).toHaveAccessibleName("Codex, Model Default");
     expect(within(picker).getByTestId("new-chat-landing-agent-model-value")).toHaveTextContent(
       "Models unavailable",
     );
@@ -2561,7 +2561,7 @@ describe("NewChatLandingScreen", () => {
     renderLanding();
 
     expect(screen.getByTestId("new-chat-landing-agent-select")).toHaveAccessibleName(
-      "Pi, Model Default, Thinking level Default",
+      "Pi, Model Default",
     );
   });
 
@@ -3188,7 +3188,11 @@ describe("NewChatLandingScreen", () => {
     // Back to GPT-5.5, whose ladder has no xhigh: the stale rung
     // resets so Save can't commit a level the model rejects.
     fireEvent.click(screen.getByRole("menuitemcheckbox", { name: "GPT-5.5" }));
-    expect(selectedPickerEffort().textContent).toContain("Default");
+    expect(
+      within(screen.getByTestId("new-chat-landing-agent-efforts")).queryByRole("menuitemcheckbox", {
+        checked: true,
+      }),
+    ).toBeNull();
     closePrimaryPicker();
 
     fireEvent.change(screen.getByTestId("new-chat-landing-input"), {
@@ -3210,7 +3214,11 @@ describe("NewChatLandingScreen", () => {
     // Claude's row reopens on its own remembered effort (nothing stored →
     // Default) — the Codex pick must not ride the shared state across.
     openAgentModels("a1");
-    expect(selectedPickerEffort().textContent).toContain("Default");
+    expect(
+      within(screen.getByTestId("new-chat-landing-agent-efforts")).queryByRole("menuitemcheckbox", {
+        checked: true,
+      }),
+    ).toBeNull();
     closePrimaryPicker();
 
     // Codex reopens on the remembered pick, still valid for its ladder.
@@ -3373,19 +3381,19 @@ describe("NewChatLandingScreen", () => {
 
     const permissions = screen.getByTestId("new-chat-landing-permission-chip");
     expect(permissions).toBeVisible();
-    expect(permissions).toHaveAccessibleName("Permissions: Skip permissions");
+    expect(permissions).toHaveAccessibleName("Permission mode: Skip permissions");
     openAgentModels("a_agy");
     expect(screen.getByTestId("new-chat-landing-agent-models")).toBeVisible();
     pickPrimaryOption("model", "Claude Sonnet 4.6");
     closePrimaryPicker();
-    expect(permissions).toHaveAccessibleName("Permissions: Skip permissions");
+    expect(permissions).toHaveAccessibleName("Permission mode: Skip permissions");
 
     pickPermissionOption("default");
-    expect(permissions).toHaveAccessibleName("Permissions: Ask every time");
+    expect(permissions).toHaveAccessibleName("Permission mode: Ask every time");
     expect(readHarnessOptions("antigravity-native").mode).toBe("default");
     remountLanding();
     expect(screen.getByTestId("new-chat-landing-permission-chip")).toHaveAccessibleName(
-      "Permissions: Ask every time",
+      "Permission mode: Ask every time",
     );
     const { body } = await submitAndReadBody();
     expect(body.model_override).toBe("claude-sonnet-4-6");
@@ -3534,7 +3542,7 @@ describe("NewChatLandingScreen", () => {
     selectAgent("a2");
     pickPermissionOption("bypass");
     expect(screen.getByTestId("new-chat-landing-permission-chip")).toHaveAccessibleName(
-      "Approval: Bypass approvals & sandbox",
+      "Permission mode: Bypass approvals & sandbox",
     );
     expect(readHarnessOptions("codex-native").mode).toBe("bypass");
     expect(screen.queryByRole("dialog")).toBeNull();
@@ -3546,14 +3554,14 @@ describe("NewChatLandingScreen", () => {
     selectAgent("a2");
     pickPermissionOption("bypass");
     expect(screen.getByTestId("new-chat-landing-permission-chip")).toHaveAccessibleName(
-      "Approval: Bypass approvals & sandbox",
+      "Permission mode: Bypass approvals & sandbox",
     );
 
     // A different agent starts a fresh context, so returning to Codex disarms bypass.
     selectAgent("a1");
     selectAgent("a2");
     expect(screen.getByTestId("new-chat-landing-permission-chip")).toHaveAccessibleName(
-      "Approval: Default",
+      "Permission mode: Default",
     );
   });
 
@@ -3563,7 +3571,7 @@ describe("NewChatLandingScreen", () => {
     pickPermissionOption("bypass");
     remountLanding();
     expect(screen.getByTestId("new-chat-landing-permission-chip")).toHaveAccessibleName(
-      "Approval: Bypass approvals & sandbox",
+      "Permission mode: Bypass approvals & sandbox",
     );
   });
 
@@ -3607,7 +3615,7 @@ describe("NewChatLandingScreen", () => {
     pickPermissionOption("bypass");
     pickPermissionOption(mode);
     expect(screen.getByTestId("new-chat-landing-permission-chip")).toHaveAccessibleName(
-      `Approval: ${label}`,
+      `Permission mode: ${label}`,
     );
     expect(readHarnessOptions("codex-native").mode).toBe(mode);
 
@@ -5480,7 +5488,7 @@ describe("NewChatLandingScreen agent picker + config gear", () => {
     // Clicking a2 (Codex) commits the pick — the trigger reflects it.
     fireEvent.click(screen.getByTestId("new-chat-landing-agent-a2"));
     expect(screen.getByTestId("new-chat-landing-agent-select")).toHaveAccessibleName(
-      "Codex, Model GPT-5.5, Effort Default",
+      "Codex, Model GPT-5.5",
     );
   });
 
@@ -5521,7 +5529,7 @@ describe("NewChatLandingScreen agent picker + config gear", () => {
     const pickerTooltip = await screen.findByTestId("new-chat-landing-agent-tooltip");
     expect(pickerTooltip).toHaveTextContent("Harness: Claude Code");
     expect(pickerTooltip).toHaveTextContent("Model: Default");
-    expect(pickerTooltip).toHaveTextContent("Effort: Default");
+    expect(pickerTooltip).not.toHaveTextContent("Effort:");
     expect(pickerTooltip).toHaveTextContent("Connection: Claude subscription");
     fireEvent.blur(picker);
   });
@@ -5531,7 +5539,7 @@ describe("NewChatLandingScreen agent picker + config gear", () => {
     selectAgent("a2");
     pickPermissionOption("bypass");
     const approval = screen.getByTestId("new-chat-landing-permission-chip");
-    expect(approval).toHaveAccessibleName("Approval: Bypass approvals & sandbox");
+    expect(approval).toHaveAccessibleName("Permission mode: Bypass approvals & sandbox");
   });
 
   it("does not change permissions when the hand menu is dismissed without a selection", () => {
@@ -5540,7 +5548,7 @@ describe("NewChatLandingScreen agent picker + config gear", () => {
     fireEvent.pointerMove(screen.getByRole("menuitem", { name: "Plan" }));
     closeMenu();
     expect(screen.getByTestId("new-chat-landing-permission-chip")).toHaveAccessibleName(
-      "Permissions: Manual",
+      "Permission mode: Manual",
     );
   });
 
@@ -5551,7 +5559,7 @@ describe("NewChatLandingScreen agent picker + config gear", () => {
     expect(screen.queryByRole("dialog")).toBeNull();
     remountLanding();
     expect(screen.getByTestId("new-chat-landing-permission-chip")).toHaveAccessibleName(
-      "Permissions: Plan",
+      "Permission mode: Plan",
     );
   });
 
@@ -5734,7 +5742,7 @@ describe("NewChatLandingScreen agent picker (mobile drill-in)", () => {
     closeMenu();
     pickPermissionOption("bypass");
     expect(screen.getByTestId("new-chat-landing-permission-chip")).toHaveAccessibleName(
-      "Approval: Bypass approvals & sandbox",
+      "Permission mode: Bypass approvals & sandbox",
     );
   });
 
@@ -6596,7 +6604,7 @@ describe("NewChatLandingScreen Smart Routing harness row", () => {
     renderLanding({ smart_routing_enabled: true });
     selectSmartRoutingHarness();
     const permission = screen.getByTestId("new-chat-landing-permission-chip");
-    expect(permission).toHaveAccessibleName("Permissions: Default");
+    expect(permission).toHaveAccessibleName("Permission mode: Default");
     // Every harness-specific knob is undecidable before the router picks.
     expect(screen.queryByTestId("new-chat-landing-config-model")).toBeNull();
     expect(screen.queryByTestId("new-chat-landing-config-effort")).toBeNull();
@@ -6624,16 +6632,16 @@ describe("NewChatLandingScreen Smart Routing harness row", () => {
     );
     renderLanding({ smart_routing_enabled: true });
     expect(screen.getByTestId("new-chat-landing-permission-chip")).toHaveAccessibleName(
-      "Permissions: Plan",
+      "Permission mode: Plan",
     );
 
     selectSmartRoutingHarness();
     expect(screen.getByTestId("new-chat-landing-permission-chip")).toHaveAccessibleName(
-      "Permissions: Default",
+      "Permission mode: Default",
     );
     selectAgent("a1");
     expect(screen.getByTestId("new-chat-landing-permission-chip")).toHaveAccessibleName(
-      "Permissions: Manual",
+      "Permission mode: Manual",
     );
   });
 
@@ -6645,7 +6653,7 @@ describe("NewChatLandingScreen Smart Routing harness row", () => {
     );
     selectAgent("a2");
     expect(screen.getByTestId("new-chat-landing-agent-select")).toHaveAccessibleName(
-      "Codex, Model GPT-5.5, Effort Default",
+      "Codex, Model GPT-5.5",
     );
   });
 
@@ -6742,7 +6750,7 @@ describe("NewChatLandingScreen Smart Routing harness row", () => {
       // Exactly what an empty store would have given: the default harness pick.
       const chip = screen.getByTestId("new-chat-landing-agent-select");
       expect(chip.textContent).not.toContain("Smart Routing");
-      expect(chip).toHaveAccessibleName("Claude Code, Model Default, Effort Default");
+      expect(chip).toHaveAccessibleName("Claude Code, Model Default");
       expect(screen.queryByTestId("new-chat-landing-smart-routing-dropped")).toBeNull();
       openPicker();
       expect(screen.getByTestId(SMART_ROUTING_ROW)).toHaveAttribute("data-disabled");
@@ -6875,7 +6883,7 @@ describe("NewChatLandingScreen Smart Routing harness row", () => {
 
     remountLanding({ smart_routing_enabled: true });
     expect(screen.getByTestId("new-chat-landing-agent-select")).toHaveAccessibleName(
-      "Claude Code, Model Default, Effort Default",
+      "Claude Code, Model Default",
     );
   });
 
