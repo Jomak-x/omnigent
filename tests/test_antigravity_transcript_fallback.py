@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 from pathlib import Path
 
 import httpx
@@ -135,15 +136,22 @@ def test_baseline_tracks_inode_and_ignores_stale_cache(tmp_path: Path) -> None:
 
 
 def test_bridge_registers_scoped_stop_hook(tmp_path: Path) -> None:
-    bridge_dir = tmp_path / "bridge"
+    bridge_dir = tmp_path / "bridge with spaces"
     bridge_dir.mkdir()
     path = bridge.write_transcript_stop_hook(bridge_dir, python_executable="/usr/bin/python3")
     hooks = json.loads(path.read_text())
     assert list(hooks) == ["omnigent-transcript-stop"]
     registration = hooks["omnigent-transcript-stop"]["Stop"]
+    assert len(registration) == 1
     assert registration[0]["type"] == "command"
-    assert "omnigent.harnesses.antigravity_native.stop_hook" in registration[0]["command"]
-    assert str(bridge_dir) in registration[0]["command"]
+    assert shlex.split(registration[0]["command"]) == [
+        "/usr/bin/python3",
+        "-I",
+        "-m",
+        "omnigent.harnesses.antigravity_native.stop_hook",
+        "--bridge-dir",
+        str(bridge_dir),
+    ]
 
 
 def test_extract_user_request_keeps_embedded_closing_tag() -> None:

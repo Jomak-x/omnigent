@@ -6,15 +6,21 @@ import asyncio
 import threading
 from pathlib import Path
 from typing import Any
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from fastapi import Response
 
 from omnigent.runner import app as runner_app
 from omnigent.runner import create_runner_app
+from omnigent.runtime.harnesses.process_manager import NoLiveHarnessError
 from omnigent.spec.types import AgentSpec, ExecutorSpec
-from tests.runner.conftest import _FakeProcessManager, _runner_client, _ScriptedHarnessClient
+from tests.runner.conftest import (
+    _FakeProcessManager,
+    _ordered_user_texts,
+    _runner_client,
+    _ScriptedHarnessClient,
+)
 from tests.runner.helpers import NullServerClient
 
 
@@ -452,3 +458,154 @@ async def test_stop_waits_for_retained_adapter_injection_before_native_ack(
     assert native_cancellations == [bridge_dir]
     assert not native_active.is_set()
     assert paste_calls == ["first turn", "first turn"]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_stop_caller_retains_native_cancellation_before_later_turn(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from omnigent.harnesses.antigravity_native import bridge
+    from omnigent.harnesses.claude_native import bridge as relay_bridge
+    from omnigent.inner import antigravity_native_executor as executor_mod
+    from omnigent.runner.native import interrupt as interrupt_mod
+
+    monkeypatch.setattr(runner_app, "_launch_native_terminal", AsyncMock(return_value=False))
+    monkeypatch.setattr("omnigent.spec.parser.discover_host_skills", lambda *_args: [])
+    monkeypatch.setattr(relay_bridge, "start_tool_relay", lambda **_kwargs: Mock())
+    monkeypatch.setattr(relay_bridge, "post_tools_changed", lambda *_args: None)
+    monkeypatch.setattr(
+        interrupt_mod, "_session_labels_for_runner_spawn", AsyncMock(return_value={})
+    )
+
+    child_id = "antigravity-disconnected-stop"
+    cascade_id = "c8f1b40b-03bd-4dc4-886a-dd406eeec926"
+    monkeypatch.setattr(bridge, "_BRIDGE_ROOT", tmp_path / "agy-bridges")
+    bridge_dir = bridge.bridge_dir_for_bridge_id(child_id)
+    bridge.write_bridge_state(
+        bridge_dir,
+        bridge.AntigravityNativeBridgeState(
+            session_id=child_id, conversation_id=cascade_id
+        ),
+    )
+    bridge.write_tmux_target(
+        bridge_dir, socket_path=tmp_path / "tmux.sock", tmux_target="main"
+    )
+    worker_started = asyncio.Event()
+    release_worker = threading.Event()
+    boundary_started = asyncio.Event()
+    release_boundary = threading.Event()
+    side_effects: list[str] = []
+    loop = asyncio.get_running_loop()
+
+    def _blocked_escape(*_args: Any, **_kwargs: Any) -> bool:
+        loop.call_soon_threadsafe(worker_started.set)
+        if not release_worker.wait(timeout=5):
+            raise RuntimeError("test native cancellation worker was not released")
+        side_effects.append("escape")
+        return True
+
+    def _record_boundary(*_args: Any, **_kwargs: Any) -> bool:
+        loop.call_soon_threadsafe(boundary_started.set)
+        if not release_boundary.wait(timeout=5):
+            raise RuntimeError("test boundary worker was not released")
+        side_effects.append("boundary")
+        return True
+
+    monkeypatch.setattr(executor_mod, "turn_is_idle_via_tui", lambda _bridge: False)
+    monkeypatch.setattr(executor_mod, "resolve_language_server_port", lambda _cascade: None)
+    monkeypatch.setattr(executor_mod, "interrupt_turn_via_tui", _blocked_escape)
+    monkeypatch.setattr(executor_mod, "wait_for_turn_idle_via_tui", lambda _bridge: True)
+    monkeypatch.setattr(
+        executor_mod, "_record_confirmed_interruption_if_current", _record_boundary
+    )
+
+    class _DispatchHarnessClient(_ScriptedHarnessClient):
+        def stream(self, *args: Any, **kwargs: Any) -> Any:
+            side_effects.append("later-turn")
+            return super().stream(*args, **kwargs)
+
+    class _NoLiveInterruptProcessManager(_FakeProcessManager):
+        async def get_client(
+            self, conversation_id: str, harness: str, env: Any = None
+        ) -> _ScriptedHarnessClient:
+            if harness == "any":
+                raise NoLiveHarnessError(f"no live harness for {conversation_id}")
+            return await super().get_client(conversation_id, harness, env)
+
+    harness_client = _DispatchHarnessClient([])
+    process_manager = _NoLiveInterruptProcessManager(harness_client)
+
+    async def _resolver(agent_id: str, session_id: str | None = None) -> AgentSpec:
+        del agent_id, session_id
+        return _antigravity_spec()
+
+    app = create_runner_app(
+        process_manager=process_manager,  # type: ignore[arg-type]
+        spec_resolver=_resolver,
+        server_client=NullServerClient(),  # type: ignore[arg-type]
+    )
+    proxy_blocker = asyncio.Event()
+
+    async def _raw_proxy_turn() -> None:
+        await proxy_blocker.wait()
+
+    proxy_turn = asyncio.create_task(_raw_proxy_turn())
+    try:
+        async with _runner_client(app) as client:
+            created = await client.post(
+                "/v1/sessions", json={"session_id": child_id, "agent_id": "antigravity"}
+            )
+            assert created.status_code == 201, created.text
+            app.state.active_turns[child_id] = proxy_turn
+
+            abandoned = asyncio.create_task(
+                client.post(f"/v1/sessions/{child_id}/events", json={"type": "interrupt"})
+            )
+            await asyncio.wait_for(worker_started.wait(), timeout=3)
+            abandoned.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await abandoned
+
+            repeated = asyncio.create_task(
+                client.post(f"/v1/sessions/{child_id}/events", json={"type": "stop_session"})
+            )
+            await asyncio.sleep(0)
+            assert not repeated.done()
+            later = await client.post(
+                f"/v1/sessions/{child_id}/events",
+                json={
+                    "type": "message",
+                    "content": [{"type": "input_text", "text": "later turn"}],
+                },
+            )
+            assert later.status_code == 202, later.text
+            assert later.json()["status"] == "buffered"
+            assert side_effects == []
+            assert harness_client.posted_bodies == []
+
+            release_worker.set()
+            await asyncio.wait_for(boundary_started.wait(), timeout=3)
+            repeated.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await repeated
+            repeated = asyncio.create_task(
+                client.post(f"/v1/sessions/{child_id}/events", json={"type": "interrupt"})
+            )
+            await asyncio.sleep(0)
+            assert not repeated.done()
+            assert side_effects == ["escape"]
+            assert harness_client.posted_bodies == []
+            release_boundary.set()
+            confirmed = await repeated
+            assert confirmed.status_code == 204, confirmed.text
+            await _wait_until(lambda: len(harness_client.posted_bodies) == 1)
+    finally:
+        release_worker.set()
+        release_boundary.set()
+        proxy_blocker.set()
+        await asyncio.gather(proxy_turn, return_exceptions=True)
+        runner_app._session_inboxes_ref.pop(child_id, None)
+        runner_app._session_event_queues_ref.pop(child_id, None)
+
+    assert side_effects == ["escape", "boundary", "later-turn"]
+    assert "later turn" in _ordered_user_texts(harness_client.posted_bodies[0])

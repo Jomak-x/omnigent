@@ -2920,7 +2920,7 @@ def create_runner_app(
     _interrupted_sessions: set[str] = set()
     app.state.interrupted_sessions = _interrupted_sessions
     _antigravity_pending_stops: dict[str, bool] = {}
-    _antigravity_stop_locks: dict[str, asyncio.Lock] = {}
+    _antigravity_stop_tasks: dict[str, asyncio.Task[Response]] = {}
     # Desynced conversations; cleared when a fresh turn binds.
     _desynced_sessions: set[str] = set()
     app.state.desynced_sessions = _desynced_sessions
@@ -6970,71 +6970,84 @@ def create_runner_app(
             await _cancel_active_turn(conv_id, expected_task=target)
 
     async def _interrupt_antigravity_turn(conv_id: str) -> Response:
-        lock = _antigravity_stop_locks.setdefault(conv_id, asyncio.Lock())
-        async with lock:
-            had_turn = conv_id in _active_turns
+        task = _antigravity_stop_tasks.get(conv_id)
+        if task is None or task.done():
             _antigravity_pending_stops[conv_id] = False
-            target = _active_turns.get(conv_id)
-            try:
-                if isinstance(target, asyncio.Task) and not target.done():
-                    if not target.cancelling():
-                        target.cancel()
-                    try:
-                        await asyncio.wait_for(
-                            asyncio.shield(target), timeout=_ANTIGRAVITY_INTERRUPT_TIMEOUT_S
-                        )
-                    except asyncio.CancelledError:
-                        if not target.done():
-                            raise
-                harness_client = None
-                if process_manager is not None:
-                    try:
-                        harness_client = await asyncio.wait_for(
-                            process_manager.get_client(conv_id, "any"),
-                            timeout=_ANTIGRAVITY_INTERRUPT_TIMEOUT_S,
-                        )
-                    except NoLiveHarnessError:
-                        pass
-                if harness_client is not None:
-                    coordinated = await asyncio.wait_for(
-                        harness_client.post(
-                            f"/v1/sessions/{conv_id}/events",
-                            json={"type": "interrupt"},
-                            timeout=_ANTIGRAVITY_INTERRUPT_TIMEOUT_S,
-                        ),
+            task = asyncio.create_task(_perform_antigravity_interrupt(conv_id))
+            _antigravity_stop_tasks[conv_id] = task
+
+            def finished(done: asyncio.Task[Response]) -> None:
+                if _antigravity_stop_tasks.get(conv_id) is done:
+                    _antigravity_stop_tasks.pop(conv_id, None)
+                if not done.cancelled():
+                    done.exception()
+
+            task.add_done_callback(finished)
+        return await asyncio.shield(task)
+
+    async def _perform_antigravity_interrupt(conv_id: str) -> Response:
+        had_turn = conv_id in _active_turns
+        target = _active_turns.get(conv_id)
+        try:
+            if isinstance(target, asyncio.Task) and not target.done():
+                if not target.cancelling():
+                    target.cancel()
+                try:
+                    await asyncio.wait_for(
+                        asyncio.shield(target), timeout=_ANTIGRAVITY_INTERRUPT_TIMEOUT_S
+                    )
+                except asyncio.CancelledError:
+                    if not target.done():
+                        raise
+            harness_client = None
+            if process_manager is not None:
+                try:
+                    harness_client = await asyncio.wait_for(
+                        process_manager.get_client(conv_id, "any"),
                         timeout=_ANTIGRAVITY_INTERRUPT_TIMEOUT_S,
                     )
-                    if coordinated.status_code != 204:
-                        raise RuntimeError("Antigravity cancellation was not confirmed")
-                    _native_interrupt_runner._wake_parent_after_native_interrupt(conv_id)
-                    response = Response(status_code=204)
-                else:
-                    response = await _native_interrupt_runner.interrupt(
-                        "antigravity-native", conv_id
-                    )
-            except (httpx.HTTPError, RuntimeError, OSError, TimeoutError):
-                return JSONResponse(
-                    status_code=503,
-                    content={
-                        "error": "antigravity_native_interrupt_failed",
-                        "detail": "Antigravity cancellation could not be confirmed.",
-                    },
+                except NoLiveHarnessError:
+                    pass
+            if harness_client is not None:
+                coordinated = await asyncio.wait_for(
+                    harness_client.post(
+                        f"/v1/sessions/{conv_id}/events",
+                        json={"type": "interrupt"},
+                        timeout=_ANTIGRAVITY_INTERRUPT_TIMEOUT_S,
+                    ),
+                    timeout=_ANTIGRAVITY_INTERRUPT_TIMEOUT_S,
                 )
-            finally:
-                native_completed = _antigravity_pending_stops.pop(conv_id, False)
-                if isinstance(target, asyncio.Task) and target.done():
-                    if _active_turns.get(conv_id) is target:
-                        _active_turns[conv_id] = None
-                if native_completed:
-                    _on_proxy_stream_end(conv_id)
-            assert response is not None
-            if response.status_code == 204:
-                _interrupted_sessions.discard(conv_id)
-                if had_turn:
-                    _append_cancellation_items(conv_id)
-                if not native_completed:
-                    _on_proxy_stream_end(conv_id)
-            return response
+                if coordinated.status_code != 204:
+                    raise RuntimeError("Antigravity cancellation was not confirmed")
+                _native_interrupt_runner._wake_parent_after_native_interrupt(conv_id)
+                response = Response(status_code=204)
+            else:
+                response = await _native_interrupt_runner.interrupt(
+                    "antigravity-native", conv_id
+                )
+        except (httpx.HTTPError, RuntimeError, OSError, TimeoutError):
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "error": "antigravity_native_interrupt_failed",
+                    "detail": "Antigravity cancellation could not be confirmed.",
+                },
+            )
+        finally:
+            native_completed = _antigravity_pending_stops.pop(conv_id, False)
+            if isinstance(target, asyncio.Task) and target.done():
+                if _active_turns.get(conv_id) is target:
+                    _active_turns[conv_id] = None
+            if native_completed:
+                _on_proxy_stream_end(conv_id)
+        assert response is not None
+        if response.status_code == 204:
+            _interrupted_sessions.discard(conv_id)
+            if had_turn:
+                _append_cancellation_items(conv_id)
+            if not native_completed:
+                _on_proxy_stream_end(conv_id)
+        return response
 
     async def _resync_turn_state(
         conv_id: str, reason: str, *, owner_response_id: str | None = None
