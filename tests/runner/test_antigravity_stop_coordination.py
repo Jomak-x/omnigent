@@ -63,7 +63,9 @@ async def test_stop_before_native_delivery_releases_followup(
         del agent_id, resolved_session_id
         spec = _antigravity_spec()
         if setup_phase == "mcp":
-            spec.mcp_servers = [MCPServerConfig(name="fixture", transport="http", url="http://mcp")]
+            spec.mcp_servers = [
+                MCPServerConfig(name="fixture", transport="http", url="http://mcp")
+            ]
         return spec
 
     app = create_runner_app(

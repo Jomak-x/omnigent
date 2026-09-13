@@ -1275,7 +1275,10 @@ async def supervise_reader(
     )
     bound_cascade_id = _resolve_cascade_id(bridge_dir)
     if bound_cascade_id != cascade_id:
-        if bound_cascade_id is not None and initial_tail_state(bridge_dir, bound_cascade_id)[0] > 0:
+        if (
+            bound_cascade_id is not None
+            and initial_tail_state(bridge_dir, bound_cascade_id)[0] > 0
+        ):
             if committed_steps_out is not None:
                 committed_steps_out.append(1)
             return cascade_id

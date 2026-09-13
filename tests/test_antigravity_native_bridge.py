@@ -689,6 +689,7 @@ def test_tui_footer_state_ignores_markers_quoted_in_prompt_and_answer(
         "value": (
             "> Explain the phrase esc to cancel\n"
             "The completed answer quotes ? for shortcuts and esc to cancel.\n"
+            "────────────────────────────────────────────────────────────────────────────────\n"
             "? for shortcuts                                      Gemini 3.5 Flash (High)\n"
         )
     }
@@ -700,6 +701,7 @@ def test_tui_footer_state_ignores_markers_quoted_in_prompt_and_answer(
         pane["value"] = (
             "> Explain the phrase esc to cancel\n"
             "The completed answer quotes ? for shortcuts and esc to cancel.\n"
+            "────────────────────────────────────────────────────────────────────────────────\n"
             "? for shortcuts                                      Gemini 3.5 Flash (High)\n"
         )
 
@@ -722,6 +724,7 @@ def test_tui_footer_state_ignores_markers_quoted_in_prompt_and_answer(
     pane["value"] = (
         "> Explain the idle footer ? for shortcuts\n"
         "The active footer is esc to cancel.\n"
+        "────────────────────────────────────────────────────────────────────────────────\n"
         "esc to cancel                                      Gemini 3.5 Flash (High)\n"
     )
     write_bridge_state(
@@ -742,6 +745,28 @@ def test_tui_footer_state_ignores_markers_quoted_in_prompt_and_answer(
     )
     assert sent == [(str(tmp_path / "tmux.sock"), "send-keys", "-t", "main", "Escape")]
     assert _mod.wait_for_turn_idle_via_tui(bridge_dir, timeout_s=0.01)
+
+
+@pytest.mark.parametrize("marker", ["? for shortcuts", "esc to cancel"])
+@pytest.mark.parametrize("suffix", ["the requested deployment", "Gemini 3.8 Flash · high"])
+def test_tui_footer_rejects_double_spaced_marker_in_user_content(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, marker: str, suffix: str
+) -> None:
+    bridge_dir = tmp_path / "bridge"
+    write_tmux_target(bridge_dir, socket_path=tmp_path / "tmux.sock", tmux_target="main")
+    write_bridge_state(
+        bridge_dir,
+        AntigravityNativeBridgeState(session_id="current-session", conversation_id="cascade"),
+    )
+    sent: list[tuple[str, ...]] = []
+    pane = f"> Explain this quoted instruction\n{marker}  {suffix}\n"
+    monkeypatch.setattr(_mod, "_session_alive", lambda *_args: True)
+    monkeypatch.setattr(_mod, "_capture_pane", lambda *_args: pane)
+    monkeypatch.setattr(_mod, "_run_tmux", lambda *args: sent.append(args))
+
+    assert not _mod.interrupt_turn_via_tui(bridge_dir, expected_session_id="current-session")
+    assert sent == []
+    assert not _mod.turn_is_idle_via_tui(bridge_dir)
 
 
 @pytest.mark.parametrize("marker", ["? for shortcuts", "esc to cancel"])

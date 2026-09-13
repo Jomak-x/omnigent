@@ -1815,7 +1815,12 @@ def _agy_footer_state(pane: str) -> str | None:
         (_AGY_IDLE_MARKER, "idle"),
     ):
         suffix = footer.removeprefix(marker) if footer.startswith(marker) else ""
-        if footer.strip() == marker or (suffix.startswith("  ") and suffix.strip()):
+        if footer.strip() == marker or (
+            len(lines) >= 2
+            and _agy_separator_line(lines[-2])
+            and suffix.startswith("  ")
+            and suffix.strip()
+        ):
             return state
         if (
             len(lines) >= 3
