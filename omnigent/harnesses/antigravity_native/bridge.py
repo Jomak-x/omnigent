@@ -51,6 +51,13 @@ def is_placeholder_conversation_id(conversation_id: str) -> bool:
     return conversation_id.startswith(AGY_PLACEHOLDER_CONVERSATION_PREFIX)
 
 
+def cascade_is_current(expected_cascade_id: str, cascade_id: str) -> bool:
+    return cascade_id == expected_cascade_id or (
+        is_placeholder_conversation_id(expected_cascade_id)
+        and not is_placeholder_conversation_id(cascade_id)
+    )
+
+
 # Canonical root of agy's per-user app-data tree (``~/.gemini/antigravity-cli``).
 # Single-sourced here and imported by the forwarder (transcript / brain
 # discovery) so a change to agy's data-dir layout is a one-line edit. (The
@@ -1811,7 +1818,28 @@ def _agy_footer_state(pane: str) -> str | None:
     return None
 
 
-def interrupt_turn_via_tui(bridge_dir: Path) -> bool:
+def _interrupt_owner_is_current(
+    bridge_dir: Path,
+    *,
+    expected_session_id: str | None,
+    expected_cascade_id: str | None,
+) -> bool:
+    if expected_session_id is None:
+        return True
+    state = read_bridge_state(bridge_dir)
+    if state is None or state.session_id != expected_session_id:
+        return False
+    return expected_cascade_id is None or cascade_is_current(
+        expected_cascade_id, state.conversation_id
+    )
+
+
+def interrupt_turn_via_tui(
+    bridge_dir: Path,
+    *,
+    expected_session_id: str | None = None,
+    expected_cascade_id: str | None = None,
+) -> bool:
     """Send agy's visible cancel key only while its TUI shows an active turn."""
     info = read_tmux_info(bridge_dir)
     if info is None:
@@ -1821,6 +1849,12 @@ def interrupt_turn_via_tui(bridge_dir: Path) -> bool:
     if not _session_alive(socket_path, tmux_target):
         return False
     if _agy_footer_state(_capture_pane(socket_path, tmux_target)) != "active":
+        return False
+    if not _interrupt_owner_is_current(
+        bridge_dir,
+        expected_session_id=expected_session_id,
+        expected_cascade_id=expected_cascade_id,
+    ):
         return False
     _run_tmux(socket_path, "send-keys", "-t", tmux_target, "Escape")
     return True

@@ -463,7 +463,9 @@ def test_interrupt_session_rpc_failure_returns_false(
     _seed_state(tmp_path)
     monkeypatch.setattr(executor_mod, "resolve_language_server_port", lambda _conv: _PORT)
     monkeypatch.setattr(executor_mod, "cancel_cascade_steps", lambda _port, _cid: False)
-    monkeypatch.setattr(executor_mod, "interrupt_turn_via_tui", lambda _bridge: False)
+    monkeypatch.setattr(
+        executor_mod, "interrupt_turn_via_tui", lambda _bridge, **_kwargs: False
+    )
     result = asyncio.run(_executor(tmp_path).interrupt_session("main"))
     assert result is False
 
@@ -486,7 +488,9 @@ def test_interrupt_session_no_port_returns_false(
 
     monkeypatch.setattr(executor_mod, "resolve_language_server_port", lambda _conv: None)
     monkeypatch.setattr(executor_mod, "cancel_cascade_steps", _cancel)
-    monkeypatch.setattr(executor_mod, "interrupt_turn_via_tui", lambda _bridge: False)
+    monkeypatch.setattr(
+        executor_mod, "interrupt_turn_via_tui", lambda _bridge, **_kwargs: False
+    )
     result = asyncio.run(_executor(tmp_path).interrupt_session("main"))
     assert result is False
     assert called["cancel"] is False
@@ -514,7 +518,9 @@ def test_interrupt_session_placeholder_returns_false(
 
     monkeypatch.setattr(executor_mod, "resolve_language_server_port", _resolve_port)
     monkeypatch.setattr(executor_mod, "cancel_cascade_steps", _cancel)
-    monkeypatch.setattr(executor_mod, "interrupt_turn_via_tui", lambda _bridge: False)
+    monkeypatch.setattr(
+        executor_mod, "interrupt_turn_via_tui", lambda _bridge, **_kwargs: False
+    )
     result = asyncio.run(_executor(tmp_path).interrupt_session("main"))
     assert result is False
     assert called["cancel"] is False
@@ -528,7 +534,7 @@ def test_interrupt_uses_tui_when_rpc_is_unavailable(
     monkeypatch.setattr(executor_mod, "resolve_language_server_port", lambda _conv: None)
     calls: list[Path] = []
 
-    def interrupt(bridge_dir: Path) -> bool:
+    def interrupt(bridge_dir: Path, **_kwargs: object) -> bool:
         calls.append(bridge_dir)
         return True
 
@@ -619,6 +625,123 @@ async def test_interrupt_waits_for_inflight_tui_injection(
         await interruption
     assert actions == ["injected", "cancelled"]
     assert delivery.cancelled() is cancel_delivery
+
+
+@pytest.mark.asyncio
+async def test_interrupt_rejects_delivery_queued_before_cancellation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_state(tmp_path)
+    executor = _executor(tmp_path)
+    loop = asyncio.get_running_loop()
+    first_started = asyncio.Event()
+    release_first = threading.Event()
+    actions: list[str] = []
+
+    def _inject(_bridge: Path, *, content: str) -> None:
+        if content == "first":
+            loop.call_soon_threadsafe(first_started.set)
+            if not release_first.wait(timeout=5):
+                raise RuntimeError("test injection was not released")
+        actions.append(content)
+
+    async def _interrupt(_bridge: Path, *, expected_session_id: str | None) -> bool:
+        actions.append("cancelled")
+        return True
+
+    monkeypatch.setattr(executor_mod, "inject_user_message_via_tui", _inject)
+    monkeypatch.setattr(executor_mod, "interrupt_bridge_turn", _interrupt)
+    first = asyncio.create_task(executor.enqueue_session_message("main", "first"))
+    await asyncio.wait_for(first_started.wait(), timeout=5)
+    queued = asyncio.create_task(executor.enqueue_session_message("main", "queued"))
+    await asyncio.sleep(0)
+    interruption = asyncio.create_task(executor.interrupt_session("main"))
+    await asyncio.sleep(0)
+    release_first.set()
+    assert await first is True
+    assert await queued is False
+    assert await interruption is True
+    assert actions == ["first", "cancelled"]
+
+
+@pytest.mark.asyncio
+async def test_retained_native_adapter_confirms_interrupt_after_detach(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import omnigent.inner.antigravity_native_harness as harness_mod
+
+    class _InterruptExecutor:
+        def __init__(self, result: bool) -> None:
+            self.result = result
+            self.calls: list[str] = []
+
+        async def interrupt_session(self, session_key: str) -> bool:
+            self.calls.append(session_key)
+            return self.result
+
+    retained = _InterruptExecutor(True)
+    monkeypatch.setattr(harness_mod, "_build_antigravity_native_executor", lambda: retained)
+    adapter = harness_mod.AntigravityNativeExecutorAdapter()
+    adapter._ensure_executor()
+    adapter._executor = None
+
+    response = await adapter._handle_interrupt_event()
+
+    assert response.status_code == 204
+    assert retained.calls == [adapter._session_key]
+
+
+@pytest.mark.asyncio
+async def test_retained_native_adapter_rejects_unconfirmed_interrupt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import omnigent.inner.antigravity_native_harness as harness_mod
+    from omnigent.runtime.harnesses._scaffold import TurnContext
+
+    class _InterruptExecutor:
+        async def interrupt_session(self, session_key: str) -> bool:
+            return False
+
+    monkeypatch.setattr(
+        harness_mod, "_build_antigravity_native_executor", lambda: _InterruptExecutor()
+    )
+    adapter = harness_mod.AntigravityNativeExecutorAdapter()
+    adapter._ensure_executor()
+    ctx = TurnContext(
+        response_id="response",
+        event_queue=asyncio.Queue(),
+        cancelled=asyncio.Event(),
+    )
+    adapter._in_flight[ctx.response_id] = ctx
+
+    response = await adapter._handle_interrupt_event()
+
+    assert response.status_code == 503
+    assert ctx.cancelled.is_set()
+
+
+@pytest.mark.asyncio
+async def test_native_adapter_confirms_interrupt_before_first_delivery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import omnigent.inner.antigravity_native_harness as harness_mod
+
+    class _InterruptExecutor:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def interrupt_session(self, session_key: str) -> bool:
+            self.calls.append(session_key)
+            return False
+
+    retained = _InterruptExecutor()
+    monkeypatch.setattr(harness_mod, "_build_antigravity_native_executor", lambda: retained)
+    adapter = harness_mod.AntigravityNativeExecutorAdapter()
+
+    response = await adapter._handle_interrupt_event()
+
+    assert response.status_code == 503
+    assert retained.calls == [adapter._session_key]
 
 
 # ---------------------------------------------------------------------------

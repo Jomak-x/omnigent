@@ -232,7 +232,9 @@ async def test_antigravity_unconfirmed_cancel_returns_503_without_parent_wake(
         executor, "cancel_cascade_steps", lambda _port, _cid: calls.append("rpc") or True
     )
     monkeypatch.setattr(
-        executor, "interrupt_turn_via_tui", lambda _bridge: calls.append("tui") or True
+        executor,
+        "interrupt_turn_via_tui",
+        lambda _bridge, **_kwargs: calls.append("tui") or True,
     )
     runner, captured = _make_runner()
     response = await getattr(runner, event_type)("antigravity-native", "conv_agy")

@@ -110,6 +110,12 @@ async def test_events_cancel_antigravity_native_without_inprocess_turn(
             if kwargs.get("json", {}).get("type") == "interrupt":
                 release_injection.set()
                 await asyncio.sleep(0)
+                response = await super().post(url, **kwargs)
+                cancelled = await agy_executor.interrupt_bridge_turn(
+                    agy_bridge.bridge_dir_for_bridge_id(bridge_id), expected_session_id=conv_id
+                )
+                response.status_code = 204 if cancelled else 503
+                return response
             return await super().post(url, **kwargs)
 
     app = create_runner_app(
@@ -136,7 +142,9 @@ async def test_events_cancel_antigravity_native_without_inprocess_turn(
     monkeypatch.setattr(
         agy_executor,
         "interrupt_turn_via_tui",
-        lambda bridge_dir: pytest.fail("validated RPC should take precedence over TUI Escape"),
+        lambda bridge_dir, **_kwargs: pytest.fail(
+            "validated RPC should take precedence over TUI Escape"
+        ),
     )
     monkeypatch.setattr(agy_executor, "wait_for_turn_idle_via_tui", lambda bridge_dir: True)
 
