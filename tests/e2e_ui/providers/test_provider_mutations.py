@@ -125,6 +125,38 @@ def _replace_named_key_and_check_cleanup(runtime: ProviderSetupRuntime) -> dict[
     return {"old_ref_cleaned": True, "advanced_fields_preserved": True}
 
 
+def _check_catalog_endpoint_replacement(runtime: ProviderSetupRuntime) -> dict[str, Any]:
+    for vendor in ("openrouter", "openai"):
+        _action(
+            runtime,
+            {
+                "action": "add_key",
+                "provider": vendor,
+                "name": "endpoint-replacement",
+                "model": "fixture-endpoint-model",
+                "secret": f"fixture-{vendor}-key",
+            },
+        )
+        config = _config(runtime)
+        entry = config["providers"]["endpoint-replacement"]
+        if vendor == "openrouter":
+            assert entry["openai"]["wire_api"] == "chat"
+            entry["future_setting"] = {"keep": True}
+            entry["openai"]["context_window"] = 200000
+            _config_path(runtime).write_text(yaml.safe_dump(config, sort_keys=False))
+    assert entry["openai"]["base_url"] == "https://api.openai.com/v1"
+    assert "wire_api" not in entry["openai"]
+    assert entry["future_setting"] == {"keep": True}
+    assert entry["openai"]["context_window"] == 200000
+    summary = {
+        "base_url": entry["openai"]["base_url"],
+        "wire_api": entry["openai"].get("wire_api"),
+        "advanced_fields_preserved": True,
+    }
+    _action(runtime, {"action": "remove_provider", "name": "endpoint-replacement"})
+    return summary
+
+
 def _check_shared_secret_is_retained(runtime: ProviderSetupRuntime) -> bool:
     _action(
         runtime,
@@ -267,7 +299,9 @@ def _check_acp_add_remove_and_import_fingerprint(runtime: ProviderSetupRuntime) 
     return {"save_did_not_execute_acp": True, "stale_import_rejected": True}
 
 
-def _check_scope_replacement_in_browser(page: Page, runtime: ProviderSetupRuntime) -> bool:
+def _check_scope_replacement_in_browser(
+    page: Page, runtime: ProviderSetupRuntime, recordings: Path
+) -> bool:
     _action(
         runtime,
         {
@@ -319,10 +353,13 @@ def _check_scope_replacement_in_browser(page: Page, runtime: ProviderSetupRuntim
     saved = _config(runtime)["providers"]["scope-reuse"]
     assert "openai" not in saved
     assert saved["default"] in (True, "anthropic", ["anthropic"])
+    page.screenshot(path=str(recordings / "scope-replacement.png"), full_page=True)
     return True
 
 
-def _check_import_preview_switch_in_browser(page: Page, runtime: ProviderSetupRuntime) -> bool:
+def _check_import_preview_switch_in_browser(
+    page: Page, runtime: ProviderSetupRuntime, recordings: Path
+) -> bool:
     source_a = runtime.root / "import-preview-a.json"
     source_b = runtime.root / "import-preview-b.json"
     source_a.write_text(json.dumps({"agents": {"Preview Swap": {"command": "fixture-a"}}}))
@@ -350,6 +387,7 @@ def _check_import_preview_switch_in_browser(page: Page, runtime: ProviderSetupRu
     assert fingerprint_b != fingerprint_a
     expect(checkbox).not_to_be_checked()
     expect(button).to_be_disabled()
+    page.screenshot(path=str(recordings / "changed-preview-cleared.png"), full_page=True)
     checkbox.check()
     with (
         page.expect_request(f"**/v1/hosts/{HOST_IDS[0]}/setup/actions") as request,
@@ -428,11 +466,16 @@ def exercise_provider_mutations(
         "result": "passed",
         "fixture_only": True,
         "catalog_named_replacement": _replace_named_key_and_check_cleanup(runtime),
+        "catalog_endpoint_replacement": _check_catalog_endpoint_replacement(runtime),
         "shared_owned_slot_retained": _check_shared_secret_is_retained(runtime),
         "provider_and_harness_controls": _check_provider_and_harness_controls(runtime),
         "acp_and_import": _check_acp_add_remove_and_import_fingerprint(runtime),
-        "scope_replacement_browser": _check_scope_replacement_in_browser(page, runtime),
-        "import_preview_switch_browser": _check_import_preview_switch_in_browser(page, runtime),
+        "scope_replacement_browser": _check_scope_replacement_in_browser(
+            page, runtime, recordings
+        ),
+        "import_preview_switch_browser": _check_import_preview_switch_in_browser(
+            page, runtime, recordings
+        ),
     }
     _write_sanitized_state(runtime, recordings)
     result["malformed_config_rejected_before_secret_write"] = (

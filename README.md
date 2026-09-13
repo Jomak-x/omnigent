@@ -413,6 +413,8 @@ support Providers.
 Opening Providers only reads setup metadata. **Detect credentials** explicitly
 looks for existing credentials; **Check setup status** runs the selected
 agent's CLI setup checks and may request access to stored credentials.
+For Pi, **Check Pi default** explicitly reads local CLI configuration when a
+compatible default needs detection.
 Configured connections and saved keys do not prove vendor authentication.
 Interactive sign-in runs in the embedded guided terminal on the selected host.
 For a remote host, a vendor redirect to `localhost` reaches your browser's
