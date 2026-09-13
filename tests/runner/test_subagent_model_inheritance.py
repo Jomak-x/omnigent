@@ -66,6 +66,10 @@ async def _dispatch_without_model(
     create_bodies: list[dict[str, Any]] = []
     monkeypatch.setattr(runner_app, "get_session_agent_id", lambda _sid: "ag_parent")
     monkeypatch.setattr(runner_app, "register_child_session", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "omnigent.onboarding.harness_install.missing_harness_cli",
+        lambda _harness: None,
+    )
     session_inbox: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
 
     async def _server_handler(request: httpx.Request) -> httpx.Response:
@@ -219,6 +223,37 @@ async def test_antigravity_native_child_dispatch_preserves_catalog_model_overrid
     )
     assert bodies[0]["model_override"] == model
     discovery.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_explicit_antigravity_child_model_reaches_agy_launch_argv(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A delegated model request reaches the child's native launcher unchanged."""
+    from omnigent.harnesses.antigravity_native import launch
+
+    requested_model = "gemini-3.1-pro-high"
+    bodies = await _dispatch_without_model(
+        monkeypatch,
+        agent_spec=_spec_with_worker("antigravity-native"),
+        conv_id="conv_antigravity_child_launch_model",
+        parent_snapshot={
+            "id": "conv_antigravity_child_launch_model",
+            "agent_id": "ag_parent",
+            "model_override": None,
+            "llm_model": None,
+        },
+        explicit_model=requested_model,
+    )
+
+    monkeypatch.setattr(launch, "agy_binary_path", lambda: "/test/agy")
+    argv, _env = launch.build_agy_launch(
+        conversation_id=None,
+        model=bodies[0]["model_override"],
+        resume=False,
+    )
+
+    assert argv == ["/test/agy", "--model", requested_model]
 
 
 @pytest.mark.parametrize("parent_field", ("model_override", "llm_model"))

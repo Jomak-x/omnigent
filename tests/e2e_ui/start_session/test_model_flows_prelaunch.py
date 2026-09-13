@@ -32,6 +32,9 @@ from tests.e2e_ui.start_session.test_start_session import (
 )
 
 _ANTIGRAVITY_HOST_ROWS = [
+    {"id": "gemini-3.8-flash-high", "displayName": "Gemini 3.8 Flash (High)"},
+    {"id": "gemini-3.8-flash-medium", "displayName": "Gemini 3.8 Flash (Medium)"},
+    {"id": "gemini-3.8-flash-low", "displayName": "Gemini 3.8 Flash (Low)"},
     {"id": "gemini-3.5-pro", "displayName": "Gemini 3.5 Pro", "isDefault": False},
     {"id": "claude-sonnet-4-6", "displayName": "Claude Sonnet 4.6", "isDefault": False},
     {"id": "gpt-oss-120b", "displayName": "GPT-OSS 120B", "isDefault": False},
@@ -197,7 +200,7 @@ def test_antigravity_launch_picker_posts_selected_model(
 
 
 async def _drive_antigravity_launch_picker(
-    base_url: str, session_id: str, *, screenshot_path: Path
+    base_url: str, session_id: str, *, screenshot_path: Path, grouped_effort: bool = False
 ) -> None:
     async with async_playwright() as pw:
         browser = await pw.chromium.launch()
@@ -263,10 +266,24 @@ async def _drive_antigravity_launch_picker(
             # not evidence that a local agy installation exposes these rows.
             await page.screenshot(path=str(screenshot_path), animations="disabled")
 
-            await page.get_by_role(
-                "menuitemcheckbox", name="Claude Sonnet 4.6", exact=True
-            ).click()
-            await expect(page.get_by_test_id("new-chat-landing-agent-efforts")).to_have_count(0)
+            if grouped_effort:
+                await expect(models).to_contain_text("Gemini 3.8 Flash")
+                await expect(models).not_to_contain_text("Gemini 3.8 Flash (High)")
+                await page.get_by_test_id("new-chat-landing-agent-model-gemini-3.8-flash").click()
+                await page.get_by_test_id("new-chat-landing-agent-effort-low").click()
+                await _close_entry_models(page)
+                await page.reload()
+                await _open_entry_models(page, "ag_antigravity_e2e")
+                await expect(
+                    page.get_by_test_id("new-chat-landing-agent-effort-low")
+                ).to_have_attribute("aria-checked", "true")
+            else:
+                await page.get_by_role(
+                    "menuitemcheckbox", name="Claude Sonnet 4.6", exact=True
+                ).click()
+                await expect(page.get_by_test_id("new-chat-landing-agent-efforts")).to_have_count(
+                    0
+                )
             await _close_entry_models(page)
             await page.get_by_test_id("new-chat-landing-input").fill("inspect the repository")
             await page.get_by_test_id("new-chat-landing-submit").click()
@@ -277,7 +294,23 @@ async def _drive_antigravity_launch_picker(
             await _wait_until(lambda: len(create_bodies) == 1)
             body = create_bodies[0]
             assert body["agent_id"] == "ag_antigravity_e2e", body
-            assert body.get("model_override") == "claude-sonnet-4-6", body
+            expected_model = "gemini-3.8-flash-low" if grouped_effort else "claude-sonnet-4-6"
+            assert body.get("model_override") == expected_model, body
             assert "reasoning_effort" not in body, body
         finally:
             await browser.close()
+
+
+def test_antigravity_effort_picker_persists_exact_launch_model(
+    seeded_session: tuple[str, str], tmp_path: Path
+) -> None:
+    """Grouped model and effort survive reload and launch the advertised variant."""
+    base_url, session_id = seeded_session
+    _run_in_fresh_loop(
+        _drive_antigravity_launch_picker(
+            base_url,
+            session_id,
+            screenshot_path=tmp_path / "antigravity-effort-picker-fixture.png",
+            grouped_effort=True,
+        )
+    )

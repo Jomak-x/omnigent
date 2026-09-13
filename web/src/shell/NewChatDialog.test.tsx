@@ -294,6 +294,19 @@ const ANTIGRAVITY_MODEL_OPTIONS_RESULT = {
   isLoading: false,
   isError: false,
 };
+const ANTIGRAVITY_EFFORT_MODEL_OPTIONS_RESULT = {
+  data: [
+    { id: "gemini-3.8-flash-high", displayName: "Gemini 3.8 Flash (High)" },
+    { id: "gemini-3.8-flash-medium", displayName: "Gemini 3.8 Flash (Medium)" },
+    { id: "gemini-3.8-flash-low", displayName: "Gemini 3.8 Flash (Low)" },
+    { id: "gemini-3.1-pro-high", displayName: "Gemini 3.1 Pro (High)" },
+    { id: "gemini-3.1-pro-low", displayName: "Gemini 3.1 Pro (Low)" },
+    { id: "claude-sonnet-4-6", displayName: "Claude Sonnet 4.6" },
+    { id: "gpt-oss-120b-medium", displayName: "GPT-OSS 120B Medium" },
+  ],
+  isLoading: false,
+  isError: false,
+};
 
 const useHostModelOptionsMock = vi.mocked(useHostModelOptions);
 const useAvailableAgentsMock = vi.mocked(useAvailableAgents);
@@ -3272,6 +3285,72 @@ describe("NewChatLandingScreen", () => {
     expect(body.model_override).toBe("claude-sonnet-4-6");
     expect(body.reasoning_effort).toBeUndefined();
     expect(useHostModelOptionsMock).toHaveBeenCalledWith("host_1", "antigravity-native", true);
+  });
+
+  it("groups Antigravity sibling ids into efforts and persists the exact launch id", async () => {
+    authenticatedFetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({ id: "conv_new" }),
+    } as unknown as Response);
+    useHostModelOptionsMock.mockImplementation(
+      (_hostId, harness) =>
+        (harness === "antigravity-native"
+          ? ANTIGRAVITY_EFFORT_MODEL_OPTIONS_RESULT
+          : harness === "codex-native"
+            ? CODEX_MODEL_OPTIONS_RESULT
+            : CLAUDE_MODEL_OPTIONS_RESULT) as unknown as ReturnType<typeof useHostModelOptions>,
+    );
+    mockAgents([
+      {
+        id: "a_agy",
+        name: "antigravity-native-ui",
+        display_name: "Antigravity",
+        description: null,
+        harness: "antigravity-native",
+        skills: [],
+      },
+    ]);
+    renderLanding();
+
+    openAgentModels("a_agy");
+    expect(screen.getByRole("menuitemcheckbox", { name: "Gemini 3.8 Flash" })).toBeTruthy();
+    expect(screen.queryByRole("menuitemcheckbox", { name: "Gemini 3.8 Flash High" })).toBeNull();
+    expect(screen.getByRole("menuitemcheckbox", { name: "GPT-OSS 120B Medium" })).toBeTruthy();
+    pickPrimaryOption("model", "Gemini 3.1 Pro");
+    expect(screen.getByRole("menuitemcheckbox", { name: "Low" })).toBeTruthy();
+    expect(screen.getByRole("menuitemcheckbox", { name: "High" })).toBeTruthy();
+    expect(screen.queryByRole("menuitemcheckbox", { name: "Medium" })).toBeNull();
+    pickPrimaryOption("model", "GPT-OSS 120B Medium");
+    expect(screen.queryByTestId("new-chat-landing-agent-efforts")).toBeNull();
+    pickPrimaryOption("model", "Gemini 3.8 Flash");
+    expect(screen.getByRole("menuitemcheckbox", { name: "Low" })).toBeTruthy();
+    expect(screen.getByRole("menuitemcheckbox", { name: "Medium" })).toBeTruthy();
+    expect(screen.getByRole("menuitemcheckbox", { name: "High" })).toBeTruthy();
+    pickPrimaryOption("effort", "High");
+    pickPrimaryOption("model", "Gemini 3.1 Pro");
+    expect(selectedPickerEffort().textContent).toContain("High");
+    pickPrimaryOption("model", "Gemini 3.8 Flash");
+    pickPrimaryOption("effort", "Medium");
+    pickPrimaryOption("model", "Gemini 3.1 Pro");
+    // Pro has no Medium sibling; fall back to the first ID agy advertised.
+    expect(selectedPickerEffort().textContent).toContain("High");
+    pickPrimaryOption("model", "Gemini 3.8 Flash");
+    pickPrimaryOption("effort", "High");
+    expect(readHarnessOptions("antigravity-native")).toMatchObject({
+      model: "gemini-3.8-flash-high",
+      effort: "high",
+    });
+    closePrimaryPicker();
+
+    remountLanding();
+    openAgentModels("a_agy");
+    expect(selectedPickerModel().textContent).toContain("Gemini 3.8 Flash");
+    expect(selectedPickerEffort().textContent).toContain("High");
+    closePrimaryPicker();
+
+    const { body } = await submitAndReadBody();
+    expect(body.model_override).toBe("gemini-3.8-flash-high");
+    expect(body.reasoning_effort).toBeUndefined();
   });
 
   it("restores Antigravity permissions alongside models and clears remembered skip", async () => {
