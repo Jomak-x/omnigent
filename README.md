@@ -410,15 +410,25 @@ automatically; with several hosts, choose one explicitly. The selection stays
 on that computer if it disconnects. Older hosts may need an update before they
 support Providers.
 
-Opening Providers only reads setup metadata. **Detect credentials** explicitly
-looks for existing credentials; **Check setup status** runs the selected
+CLI readiness warnings take precedence over saved-connection counts. If an agent
+shows **Update needed**, update its CLI on the selected computer, then use
+**Check setup status**; guided sign-in is disabled while the CLI is outdated.
+
+Opening Providers only reads setup metadata. **Find credentials on this computer**
+(**Detect credentials** in Advanced provider tools) explicitly looks for existing
+credentials and checks model catalogs; **Check setup status** runs the selected
 agent's CLI setup checks and may request access to stored credentials.
 For Pi, **Check Pi default** explicitly reads local CLI configuration when a
-compatible default needs detection.
+compatible default needs detection. **Use Pi’s local configuration** saves routing
+to Pi without checking its sign-in.
 Configured connections and saved keys do not prove vendor authentication.
 Interactive sign-in runs in the embedded guided terminal on the selected host.
 For a remote host, a vendor redirect to `localhost` reaches your browser's
 computer: use the vendor's device-code/remote flow, or a browser on that host.
+
+When explicit discovery finds no catalog default for an API-key vendor, the form
+shows **Default model** outside **More options** and requires a nonblank value
+before saving. Otherwise, a blank model uses the catalog default when available.
 
 **Advanced provider tools** exposes all connections, API-key/gateway/Bedrock
 forms, and custom ACP agents. See the [OpenClaw guide](docs/openclaw.md#import-coding-agents)
