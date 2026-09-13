@@ -3248,6 +3248,7 @@ export function NewChatLandingScreen() {
         (candidate) => candidate.value === effort,
       );
       if (selected === undefined) return;
+      userPickedModelRef.current = true;
       setPickedModel(selected.modelId);
       setPickedEffort(selected.value);
       writeHarnessOption(selectedNativeHarness, {
