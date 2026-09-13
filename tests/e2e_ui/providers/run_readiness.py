@@ -18,9 +18,7 @@ from tests._helpers.provider_setup_runtime import HOST_IDS, ProviderSetupRuntime
 
 def select_host(page: Page, letter: str) -> None:
     page.get_by_test_id("settings-providers-host").click()
-    page.get_by_role(
-        "option", name=f"Fixture computer {letter} · online", exact=True
-    ).click()
+    page.get_by_role("option", name=f"Fixture computer {letter} · online", exact=True).click()
 
 
 def check(page: Page, runtime: ProviderSetupRuntime, recordings: Path) -> dict[str, object]:
@@ -28,9 +26,7 @@ def check(page: Page, runtime: ProviderSetupRuntime, recordings: Path) -> dict[s
     hosts_response.raise_for_status()
     hosts = hosts_response.json()
     rows = hosts if isinstance(hosts, list) else hosts["hosts"]
-    observed = {
-        row["host_id"]: row["configured_harnesses"]["codex-native"] for row in rows
-    }
+    observed = {row["host_id"]: row["configured_harnesses"]["codex-native"] for row in rows}
     (recordings / "readiness.json").write_text(json.dumps(observed, indent=2))
     assert observed == {
         HOST_IDS[0]: "version-too-low",
@@ -147,7 +143,7 @@ def check(page: Page, runtime: ProviderSetupRuntime, recordings: Path) -> dict[s
     provider = next(row for row in summary["providers"] if row["name"] == "openai")
     assert provider["models"]["openai"]["default"] == "fixture-explicit-model"
     assert (runtime.root / "host-b/config/config.yaml").read_bytes() == before["host-b"]
-    assert all("/setup/operations" not in url for url in writes)
+    assert all("/setup-operations" not in url for url in writes)
     page.screenshot(path=str(recordings / "explicit-model-reloaded.png"), full_page=True)
     return {
         "result": "passed",

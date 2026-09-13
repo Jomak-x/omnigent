@@ -120,11 +120,8 @@ def install(
             == os.environ.get("PROVIDER_FIXTURE_CHECKOUT")
             and effective_env.get("PROVIDER_FIXTURE_PORTS")
             == os.environ.get("PROVIDER_FIXTURE_PORTS")
-            and effective_env.get("OMNIGENT_CONFIG_HOME")
-            == os.environ.get("OMNIGENT_CONFIG_HOME")
-            and Path(effective_env.get("OMNIGENT_CONFIG_HOME", "/"))
-            .resolve()
-            .is_relative_to(root)
+            and effective_env.get("OMNIGENT_CONFIG_HOME") == os.environ.get("OMNIGENT_CONFIG_HOME")
+            and Path(effective_env.get("OMNIGENT_CONFIG_HOME", "/")).resolve().is_relative_to(root)
             and "HOME" not in effective_env
             and "CODEX_HOME" not in effective_env
         )
