@@ -137,6 +137,7 @@ import { markSessionCreated } from "@/store/interactionTelemetry";
 import { appendPromptHistoryEntry } from "@/hooks/usePromptHistory";
 import { useIsCoarsePointer } from "@/hooks/useIsCoarsePointer";
 import { useIsMobileViewport } from "@/hooks/useIsMobileViewport";
+import { useModelPickerHotkey } from "@/hooks/useModelPickerHotkey";
 import { CliCommandBlock, renderTextWithInlineCode } from "./CliCommandBlock";
 import { WorkspacePicker, isNavigablePath } from "./WorkspacePicker";
 import {
@@ -1352,6 +1353,7 @@ export function AgentHarnessPicker({
   autoHarnessAvailable = false,
   autoHarnessActive = false,
   onSelectAutoHarness,
+  openNonce = 0,
 }: {
   agentEntries: AvailableAgent[];
   harnessEntries: AvailableAgent[];
@@ -1418,9 +1420,14 @@ export function AgentHarnessPicker({
    *  would look selected at once. */
   autoHarnessActive?: boolean;
   onSelectAutoHarness?: () => void;
+  /** Bump to open the menu imperatively (the landing's model-picker hotkey). */
+  openNonce?: number;
 }) {
   // Controlled so picking a row can close the menu.
   const [open, setOpen] = useState(false);
+  // Tracks the last-applied openNonce so the imperative-open effect (below,
+  // after the drill-in state it drives) skips the initial value.
+  const appliedOpenNonce = useRef(0);
   const queryClient = useQueryClient();
   const info = useServerInfo();
   // Feature ON → single "needs setup" badge; OFF → per-reason original text.
@@ -1483,6 +1490,21 @@ export function AgentHarnessPicker({
       setConfigAgentId(null);
     }
   }, [open]);
+
+  // The landing's model-picker hotkey (⌘⇧M) bumps openNonce. Open the menu and
+  // drill straight into the selected harness's edit submenu (Models / Effort),
+  // the same jump the row's Edit affordance performs, so the chord lands on the
+  // model list rather than the harness list. Falls back to the list when the
+  // selected entry has no config to edit.
+  useEffect(() => {
+    if (!openNonce || openNonce === appliedOpenNonce.current) return;
+    appliedOpenNonce.current = openNonce;
+    setOpen(true);
+    if (effectiveAgentId && selectedConfigContent != null) {
+      setConfigAgentId(effectiveAgentId);
+      if (isMobile) setMenuPage("config");
+    }
+  }, [openNonce, effectiveAgentId, selectedConfigContent, isMobile]);
 
   const renderEntry = (agent: AvailableAgent): ReactNode => {
     const active = !autoHarnessActive && agent.id === effectiveAgentId;
@@ -2156,10 +2178,15 @@ export function NewChatLandingScreen() {
   // Pin the configured project agent into discovery so the recency-bounded
   // session scan (or its same-name dedup) can't drop or id-swap it out of
   // the picker — the config must seed the agent the project actually pinned.
+  // agentsArePlaceholder: catalog-only rows served while the sessions
+  // discovery scan is still in flight — render them (harnesses must not wait
+  // for a slow scan), but never resolve a stored agent id against them: a
+  // scan-discovered agent may still be on its way.
   const {
     data: agents,
     isLoading: agentsLoading,
     isError: agentsError,
+    isPlaceholderData: agentsArePlaceholder,
   } = useAvailableAgents({
     pinnedAgentIds: prefillConfig?.agentId != null ? [prefillConfig.agentId] : [],
   });
@@ -2636,6 +2663,12 @@ export function NewChatLandingScreen() {
   // Advanced settings for agents with a configurable brain harness.
   const [configOpen, setConfigOpen] = useState(false);
 
+  // ⌘⇧M opens the agent/model picker here, the keyboard equivalent of the
+  // existing-chat model-picker shortcut. The picker owns model selection on the
+  // landing, so the hotkey bumps a nonce the picker opens on.
+  const [modelPickerOpenNonce, setModelPickerOpenNonce] = useState(0);
+  useModelPickerHotkey(() => setModelPickerOpenNonce((n) => n + 1));
+
   // Mirror the current draft fields into a ref every render so the unmount
   // cleanup below can snapshot the latest values without re-subscribing.
   // `submittedRef` is flipped once the draft is sent to a create, so the
@@ -3027,13 +3060,22 @@ export function NewChatLandingScreen() {
     projectParam !== "" &&
     prefillConfig?.agentId != null &&
     agents !== undefined &&
+    !agentsArePlaceholder &&
     !agentList.some((a) => a.id === prefillConfig.agentId);
+  // While the list is catalog-only placeholder data, a persisted pick that
+  // isn't in it yet may be a scan-discovered agent still loading — hold the
+  // selection empty instead of silently defaulting to the first catalog row.
+  const pickUnresolvedOnPlaceholder =
+    agentsArePlaceholder &&
+    pickedAgentId !== null &&
+    pickedAgentId !== PENDING_AGENT_ID &&
+    !agentList.some((a) => a.id === pickedAgentId);
   const effectiveAgentId =
     pickedAgentId === PENDING_AGENT_ID && pendingAgentAllowedOnTarget
       ? PENDING_AGENT_ID
       : agentList.some((a) => a.id === pickedAgentId)
         ? pickedAgentId
-        : configuredAgentUnavailable
+        : configuredAgentUnavailable || pickUnresolvedOnPlaceholder
           ? null
           : (agentsLoading || prefillConfig === undefined) &&
               agentList.some((agent) => agent.id === cachedPickerOptions?.agent.id)
@@ -4059,8 +4101,10 @@ export function NewChatLandingScreen() {
     const step = projectPrefillStep(prefill, {
       hosts,
       // The pickable list, not the raw one — a hidden agent's id would seed
-      // a pick that effectiveAgentId rejects. Raw undefined = still loading.
-      agents: agents === undefined ? undefined : agentList,
+      // a pick that effectiveAgentId rejects. Raw undefined = still loading;
+      // placeholder (catalog-only) data counts as loading too, so the prefill
+      // never seeds or validates a pick against a partial list.
+      agents: agents === undefined || agentsArePlaceholder ? undefined : agentList,
       sandboxSelected,
       managedSandboxesEnabled,
       selectedHostId,
@@ -4098,6 +4142,7 @@ export function NewChatLandingScreen() {
     projectParam,
     hosts,
     agents,
+    agentsArePlaceholder,
     agentList,
     sandboxSelected,
     managedSandboxesEnabled,
@@ -6231,6 +6276,7 @@ export function NewChatLandingScreen() {
                       {/* One trigger combines the harness glyph with model / effort;
                     the selected entry's submenu owns run configuration. */}
                       <AgentHarnessPicker
+                        openNonce={modelPickerOpenNonce}
                         agentEntries={agentEntries}
                         harnessEntries={harnessEntries}
                         effectiveAgentId={effectiveAgentId}
