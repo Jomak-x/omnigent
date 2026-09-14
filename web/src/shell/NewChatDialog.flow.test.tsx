@@ -1739,7 +1739,7 @@ describe("NewChatLandingScreen create flow", () => {
     renderLanding();
     await waitForWorkspaceSeed();
     expect(screen.getByTestId("new-chat-landing-permission-chip")).toHaveAccessibleName(
-      "Approval: Bypass approvals & sandbox",
+      "Permission mode: Bypass approvals & sandbox",
     );
   });
 
@@ -1756,7 +1756,7 @@ describe("NewChatLandingScreen create flow", () => {
     await waitForWorkspaceSeed();
     // Claude's hand menu stays on Manual and never offers Codex approval presets.
     expect(screen.getByTestId("new-chat-landing-permission-chip")).toHaveAccessibleName(
-      "Permissions: Manual",
+      "Permission mode: Manual",
     );
     fireEvent.pointerDown(screen.getByTestId("new-chat-landing-permission-chip"), { button: 0 });
     expect(screen.getByTestId("new-chat-landing-permission-option-default")).toHaveTextContent(

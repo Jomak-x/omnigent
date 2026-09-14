@@ -31,12 +31,16 @@ async def _drive(
         page = await browser.new_page(viewport={"width": 1920, "height": 1000})
         release = asyncio.Event()
         create_started = asyncio.Event()
+        snapshot_ready = asyncio.Event()
         selected = "claude-opus-4-8[1m]"
         selected_label = "Opus 4.8 (1M context)"
         previous = "claude-sonnet-5"
         rows = [{"id": selected, "model": selected, "displayName": selected_label}]
+        create_bodies = []
         try:
-            await _register_common_routes(page, created_session_id=session_id, create_bodies=[])
+            await _register_common_routes(
+                page, created_session_id=session_id, create_bodies=create_bodies
+            )
             await page.route(
                 re.compile(r"/v1/sessions\?.*kind=any"),
                 lambda route: route.fulfill(json={"data": []}),
@@ -47,6 +51,8 @@ async def _drive(
             )
 
             async def snapshot(route):
+                if session_id in route.request.url:
+                    await snapshot_ready.wait()
                 response = await route.fetch()
                 body = await response.json()
                 body.update(
@@ -75,6 +81,7 @@ async def _drive(
                     await route.fallback()
                     return
                 create_started.set()
+                create_bodies.append(route.request.post_data_json)
                 await release.wait()
                 await route.fulfill(json={"id": session_id})
 
@@ -99,7 +106,9 @@ async def _drive(
                   '[data-testid="composer-agent-config-value"]';
                 const label = document.querySelector(selector);
                 if (label) window.composerSamples.push({
-                  path: location.pathname, text: label.textContent});
+                  path: location.pathname, text: label.textContent,
+                  loading: Boolean(document.querySelector(
+                    '[data-testid="composer-model-loading"]'))});
               };
               new MutationObserver(capture).observe(document.body,
                 {subtree:true, childList:true, characterData:true});
@@ -118,7 +127,16 @@ async def _drive(
             release.set()
             await page.wait_for_url(f"{base_url}/c/{session_id}")
             label = page.get_by_test_id("composer-agent-config-value")
+            assert len(create_bodies) == 1, create_bodies
+            assert create_bodies[0]["model_override"] == selected, create_bodies
+            assert create_bodies[0]["reasoning_effort"] == "high", create_bodies
+            loading = page.get_by_test_id("composer-model-loading")
+            await expect(loading).to_be_visible()
+            await expect(label).not_to_contain_text(selected)
+            await expect(label).to_contain_text("High")
+            snapshot_ready.set()
             await expect(label).to_contain_text(selected_label)
+            await expect(loading).to_have_count(0)
             await page.locator("[data-composer-card]").screenshot(
                 path=output / "bound-model.png", animations="disabled"
             )
@@ -127,10 +145,14 @@ async def _drive(
             assert any(sample["path"] == f"/c/{session_id}" for sample in samples), samples
             assert all(previous not in sample["text"] for sample in samples), samples
             assert all(
-                selected in sample["text"] or selected_label in sample["text"]
+                previous not in sample["text"] and selected not in sample["text"]
                 for sample in samples
+            ), samples
+            assert all(
+                sample["loading"] or selected_label in sample["text"] for sample in samples
             ), samples
         finally:
             release.set()
+            snapshot_ready.set()
             await page.unroute_all(behavior="wait")
             await browser.close()
