@@ -18,6 +18,7 @@ import "@xterm/xterm/css/xterm.css";
 import { type CodeFont, codeFontFamilyForEditor, readCodeFont } from "@/lib/codeFontPreferences";
 import { getThemeRoots } from "@/lib/host";
 import { selectionColors } from "@/lib/selectionColors";
+import { CodexTerminalPalette, codexTerminalTheme } from "./CodexTerminalPalette";
 
 // Card background colors derived from the app's CSS palette.
 // Light: --card: oklch(1.000 0 0) = pure white.
@@ -195,18 +196,33 @@ export type TerminalInputListener = () => void;
 /** Kitty Keyboard Protocol / CSI-u encoding for Shift+Enter. */
 export const SHIFT_ENTER_CSI_U = "\x1b[13;2u";
 
+/** Readline line-editing bytes for the macOS Cmd key mappings below. */
+export const CMD_BACKSPACE_LINE_KILL = "\x15"; // Ctrl-U: kill to line start
+export const CMD_LEFT_LINE_START = "\x01"; // Ctrl-A: cursor to line start
+export const CMD_RIGHT_LINE_END = "\x05"; // Ctrl-E: cursor to line end
+
 /**
  * Return the terminal bytes to send for a browser key event.
  *
- * xterm.js does not currently emit Kitty Keyboard Protocol sequences for
- * Shift+Enter, so the browser attach path synthesizes the CSI-u sequence
- * for that one key combination. This mirrors native terminals that support
- * CSI-u while keeping plain Enter and modified Enter variants on xterm's
- * default path.
+ * Two key families need synthesized bytes because neither xterm.js nor the
+ * browser produces them:
+ *
+ * - **Shift+Enter** — xterm does not emit Kitty Keyboard Protocol sequences
+ *   for it, so the browser attach path synthesizes the CSI-u sequence,
+ *   mirroring native terminals that support CSI-u while keeping plain Enter
+ *   and modified Enter variants on xterm's default path.
+ * - **macOS Cmd+Backspace / Cmd+Left / Cmd+Right** — the standard
+ *   readline-style line shortcuts. The Option (Alt) equivalents work because
+ *   xterm encodes Alt-modified keys as ESC-prefixed sequences that
+ *   readline/zsh read as word operations; Cmd (metaKey) combos get no
+ *   encoding at all — the browser eats them and nothing reaches the PTY.
+ *   Each maps to the Ctrl control character a native terminal sends. Only
+ *   bare Cmd combos are mapped: Cmd+C/V/K/R and friends keep their
+ *   browser/xterm meaning (copy/paste/clear/reload).
  *
  * :param event: Browser keyboard event from xterm's custom key handler.
- * :returns: CSI-u bytes for Shift+Enter, or ``null`` to let xterm handle
- *     the event normally.
+ * :returns: Bytes to send instead of xterm's default handling, or ``null``
+ *     to let xterm handle the event normally.
  */
 export function terminalKeyEventPayload(event: KeyboardEvent): string | null {
   // An in-flight IME composition owns the keyboard: xterm consults this
@@ -224,6 +240,11 @@ export function terminalKeyEventPayload(event: KeyboardEvent): string | null {
     !event.metaKey
   ) {
     return SHIFT_ENTER_CSI_U;
+  }
+  if (event.metaKey && !event.altKey && !event.ctrlKey && !event.shiftKey) {
+    if (event.key === "Backspace") return CMD_BACKSPACE_LINE_KILL;
+    if (event.key === "ArrowLeft") return CMD_LEFT_LINE_START;
+    if (event.key === "ArrowRight") return CMD_RIGHT_LINE_END;
   }
   return null;
 }
@@ -508,6 +529,7 @@ export class TerminalSession {
   private accent: string | undefined;
   private readonly dataDispose: { dispose: () => void };
   private readonly osc52Dispose: { dispose: () => void };
+  private readonly codexPalette: CodexTerminalPalette | null;
   private readonly onClipboardRequest?: TerminalClipboardListener;
   /** Whether this visible, interactive attach may write the local clipboard. */
   private clipboardEnabled: boolean;
@@ -560,9 +582,11 @@ export class TerminalSession {
     clipboardEnabled = true,
     onClipboardRequest?: TerminalClipboardListener,
     focusOnConnect = true,
+    adaptCodexPalette = false,
   ) {
     this.isDark = isDark;
     this.accent = this.readThemeAccent();
+    this.codexPalette = adaptCodexPalette ? new CodexTerminalPalette() : null;
     this.clipboardEnabled = clipboardEnabled;
     this.focusOnConnect = focusOnConnect;
     this.onClipboardRequest = onClipboardRequest;
@@ -574,12 +598,9 @@ export class TerminalSession {
       ...terminalFontOptions(readCodeFont()),
       scrollback: 20000,
       cursorBlink: true,
-      theme: terminalTheme(isDark, this.accent),
-      // 256-color indices (e.g. Claude Code's 38;5;231 white) can't be
-      // remapped via ITheme (slots 0-15 only), so they vanish on the
-      // light theme's white card. This WCAG AA contrast floor nudges a
-      // cell's foreground luminance only when it lacks contrast against
-      // its actual background.
+      theme: this.theme(isDark),
+      // Keep fixed-color CLI text readable against each cell's background
+      // without replacing its syntax palette.
       minimumContrastRatio: 4.5,
       // Opt into xterm's proposed APIs, matching openui's terminal setup.
       allowProposedApi: true,
@@ -651,7 +672,7 @@ export class TerminalSession {
       (ev) => {
         if (ev.data instanceof ArrayBuffer) {
           const bytes = new Uint8Array(ev.data);
-          this.term.write(bytes);
+          this.term.write(this.codexPalette?.write(bytes) ?? bytes);
           const now = performance.now();
           if (now - lastActivityTs > 300) {
             lastActivityTs = now;
@@ -742,7 +763,7 @@ export class TerminalSession {
       const accent = this.readThemeAccent();
       if (this.disposed || accent === this.accent) return;
       this.accent = accent;
-      this.term.options.theme = terminalTheme(this.isDark, accent);
+      this.term.options.theme = this.theme(this.isDark);
     });
     for (const root of getThemeRoots()) {
       this.themeObserver.observe(root, {
@@ -767,7 +788,12 @@ export class TerminalSession {
   setTheme(isDark: boolean): void {
     this.isDark = isDark;
     this.accent = this.readThemeAccent();
-    this.term.options.theme = terminalTheme(isDark, this.accent);
+    this.term.options.theme = this.theme(isDark);
+  }
+
+  private theme(isDark: boolean): ITheme {
+    const theme = terminalTheme(isDark, this.accent);
+    return this.codexPalette ? codexTerminalTheme(theme, isDark) : theme;
   }
 
   /** Enable clipboard bridging only for the visible, interactive surface. */
