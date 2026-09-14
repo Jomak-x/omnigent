@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, Mock
@@ -41,9 +42,21 @@ async def _wait_until(predicate: Any) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("confirmed", [False, True])
-@pytest.mark.parametrize("setup_phase", ["labels", "harness_startup", "mcp"])
+@pytest.mark.parametrize(
+    ("setup_phase", "cancel_cleanup_delay"),
+    [
+        ("labels", 0),
+        ("harness_startup", 0),
+        ("mcp", 0),
+        pytest.param("harness_startup", 0.05, id="slow_cancel_cleanup"),
+    ],
+)
 async def test_stop_before_native_delivery_releases_followup(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, confirmed: bool, setup_phase: str
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    confirmed: bool,
+    setup_phase: str,
+    cancel_cleanup_delay: float,
 ) -> None:
     """A setup-cancelled turn cannot wait for a native status edge that cannot exist."""
     from omnigent.harnesses.antigravity_native import bridge
@@ -54,6 +67,8 @@ async def test_stop_before_native_delivery_releases_followup(
     monkeypatch.setattr(relay_bridge, "start_tool_relay", lambda **_kwargs: Mock())
     monkeypatch.setattr(relay_bridge, "post_tools_changed", lambda *_args: None)
     monkeypatch.setattr(runner_app, "_launch_native_terminal", AsyncMock(return_value=False))
+    if cancel_cleanup_delay:
+        monkeypatch.setattr(runner_app, "_ANTIGRAVITY_INTERRUPT_TIMEOUT_S", 0.01)
     session_id = "antigravity-stop-before-delivery"
     harness_client = _QuiescenceHarnessClient()
     harness_client.confirmed = confirmed
@@ -82,7 +97,13 @@ async def test_stop_before_native_delivery_releases_followup(
         setup_calls += 1
         if setup_calls == 1:
             setup_started.set()
-            await asyncio.Event().wait()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                # Synchronous cleanup can delay the event loop past the join deadline.
+                if cancel_cleanup_delay:
+                    time.sleep(cancel_cleanup_delay)
+                raise
 
     async def _labels(**_kwargs: Any) -> dict[str, str]:
         if setup_phase == "labels":
@@ -131,6 +152,7 @@ async def test_stop_before_native_delivery_releases_followup(
             )
 
             assert stopped.status_code == (204 if confirmed else 503), stopped.text
+            assert harness_client.interrupt_posts == 1
             assert session_id not in app.state.active_turns
             assert harness_client.posted_bodies == []
 

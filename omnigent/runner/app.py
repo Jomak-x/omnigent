@@ -7005,6 +7005,12 @@ def create_runner_app(
                 except asyncio.CancelledError:
                     if not target.done():
                         raise
+                except TimeoutError:
+                    if not target.done():
+                        raise
+                    # Cleanup can finish before the delayed timeout callback runs.
+                    with contextlib.suppress(asyncio.CancelledError):
+                        target.result()
             harness_client = None
             if process_manager is not None:
                 with contextlib.suppress(NoLiveHarnessError):
