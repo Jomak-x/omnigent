@@ -167,6 +167,11 @@ async def test_handle_model_options_serves_the_claude_catalog(
                 "model": "system.ai.claude-sonnet-5",
                 "displayName": "Sonnet 5",
                 "isDefault": True,
+                "source": {
+                    "kind": "subscription",
+                    "label": "Subscription",
+                    "name": "claude",
+                },
             }
         ],
         routable_models=[
