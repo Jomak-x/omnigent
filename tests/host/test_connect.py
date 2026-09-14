@@ -109,8 +109,10 @@ def _no_real_zygote(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(ZYGOTE_ENABLED_ENV_VAR, "0")
 
 
+@pytest.mark.parametrize("has_cli_login", [False, True])
 async def test_handle_model_options_serves_the_claude_catalog(
     monkeypatch: pytest.MonkeyPatch,
+    has_cli_login: bool,
 ) -> None:
     """The launch picker is the harness-probed catalog, resolved on the host.
 
@@ -119,6 +121,16 @@ async def test_handle_model_options_serves_the_claude_catalog(
     served from the fingerprint store — the harness is probed once.
     """
     from omnigent.harnesses.claude_native import main as claude_native
+    from omnigent.models import model_catalog
+
+    monkeypatch.setattr(
+        model_catalog,
+        "resolve_model_provider",
+        lambda spec, harness: model_catalog.ResolvedModelProvider(
+            kind="subscription" if has_cli_login else "none",
+            cli="claude" if has_cli_login else None,
+        ),
+    )
 
     config = claude_native.ClaudeNativeUcodeConfig(
         env={"ANTHROPIC_BASE_URL": "https://gw.example"},
@@ -158,22 +170,23 @@ async def test_handle_model_options_serves_the_claude_catalog(
         HostModelOptionsFrame(request_id="req_2", harness="claude-native"),
     )
 
+    expected_model: dict[str, object] = {
+        "id": "sonnet",
+        "model": "system.ai.claude-sonnet-5",
+        "displayName": "Sonnet 5",
+        "isDefault": True,
+    }
+    if has_cli_login:
+        expected_model["source"] = {
+            "kind": "subscription",
+            "label": "Subscription",
+            "name": "claude",
+        }
+
     assert first == HostModelOptionsResultFrame(
         request_id="req_1",
         status="ok",
-        models=[
-            {
-                "id": "sonnet",
-                "model": "system.ai.claude-sonnet-5",
-                "displayName": "Sonnet 5",
-                "isDefault": True,
-                "source": {
-                    "kind": "subscription",
-                    "label": "Subscription",
-                    "name": "claude",
-                },
-            }
-        ],
+        models=[expected_model],
         routable_models=[
             "system.ai.claude-sonnet-5",
             "system.ai.claude-sonnet-5[1m]",
@@ -4485,8 +4498,17 @@ async def test_launch_cancelled_midspawn_does_not_leak_untracked_runner(
     assert spawned[0].poll() is not None, "abandoned runner was leaked, still alive"
 
 
+@pytest.fixture
+def _without_ambient_model_source(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "omnigent.host.connect._model_configuration_source_for_harness",
+        lambda harness: None,
+    )
+
+
 async def test_handle_model_options_serves_codex_probe_rows_and_caches(
     monkeypatch: pytest.MonkeyPatch,
+    _without_ambient_model_source: None,
 ) -> None:
     """A Databricks-routed Codex request is answered by the harness probe.
 
@@ -4540,6 +4562,7 @@ async def test_handle_model_options_serves_codex_probe_rows_and_caches(
 
 async def test_handle_model_options_serves_claude_sdk_endpoint_listing(
     monkeypatch: pytest.MonkeyPatch,
+    _without_ambient_model_source: None,
 ) -> None:
     """SDK-mode Claude is a pass-through client, so the endpoint listing is
     the harness truth — served in the exact wire spelling the SDK sends."""
@@ -4578,6 +4601,7 @@ async def test_handle_model_options_serves_claude_sdk_endpoint_listing(
 
 async def test_handle_model_options_claude_sdk_rides_the_probe_when_endpoints_list_nothing(
     monkeypatch: pytest.MonkeyPatch,
+    _without_ambient_model_source: None,
 ) -> None:
     """A subscription SDK launch serves the claude CLI's probed rows.
 
@@ -4623,6 +4647,7 @@ async def test_handle_model_options_claude_sdk_rides_the_probe_when_endpoints_li
 
 async def test_model_options_frame_replies_off_the_receive_loop(
     monkeypatch: pytest.MonkeyPatch,
+    _without_ambient_model_source: None,
 ) -> None:
     """A slow probe must not stall the tunnel receive loop.
 
