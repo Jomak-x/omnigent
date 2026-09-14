@@ -39,7 +39,6 @@ import {
 import { isModalHostResolved, resolveModalHost } from "@/lib/sessionHost";
 import { type SessionUpdatesFrame, sessionUpdatesSocket } from "@/lib/sessionUpdatesSocket";
 import { isTempConvId } from "@/lib/tempConversationId";
-import type { Session } from "@/lib/types";
 
 // Coalesce bursts of structural changes / watch-set recomputes into one
 // action. 250 ms is short enough to feel live, long enough to batch the
@@ -76,13 +75,6 @@ function applyItemsToCache(
     itemsById.set(
       item.id,
       nullsToUndefined(isSessionArchiving(item.id) ? { ...item, archived: true } : item),
-    );
-  }
-  for (const [id, item] of itemsById) {
-    const labels = item.labels;
-    if (labels === undefined) continue;
-    queryClient.setQueryData<Session>(["session", id], (session) =>
-      session ? { ...session, labels } : session,
     );
   }
   const foundAnywhere = new Set<string>();

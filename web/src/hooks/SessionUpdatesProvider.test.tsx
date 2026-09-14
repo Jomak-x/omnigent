@@ -5,22 +5,19 @@
 // covered separately in sessionListCache.test.ts; here we mock the socket
 // and assert exactly which ids reach `setWatched`.
 
-import { act, cleanup, render, renderHook, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, renderHook, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, useNavigate } from "react-router-dom";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { AntigravityTranscriptFallbackNotice } from "@/components/chat/AntigravityTranscriptFallbackNotice";
 import {
   clearSessionTombstones,
   useArchiveConversation,
   type Conversation,
   type ConversationsPage,
 } from "@/hooks/useConversations";
-import { useSession } from "@/hooks/useSession";
 import type { ConversationsInfiniteData } from "@/lib/sessionListCache";
-import type { Session } from "@/lib/types";
 
 // Mock the socket transport so setWatched is observable and start/stop are
 // inert. subscribe/subscribeStatus return no-op unsubscribers.
@@ -180,64 +177,6 @@ function frameHandler(): (frame: unknown) => void {
 function wireItem(id: string, commentsCount: number, commentsUpdatedAt: number | null) {
   return { ...conv(id), comments_count: commentsCount, comments_updated_at: commentsUpdatedAt };
 }
-
-function CachedFallbackNotice({ sessionId }: { sessionId: string }) {
-  const { session } = useSession(sessionId);
-  return <AntigravityTranscriptFallbackNotice labels={session?.labels} />;
-}
-
-describe("SessionUpdatesProvider session labels", () => {
-  it("updates fallback guidance while an off-sidebar chat remains mounted", async () => {
-    const client = new QueryClient();
-    seedConversations(client, ["conv_parent"]);
-    client.setQueryData<Session>(["session", "conv_child"], {
-      id: "conv_child",
-      labels: {},
-    } as Session);
-
-    render(
-      <QueryClientProvider client={client}>
-        <MemoryRouter initialEntries={["/c/conv_child"]}>
-          <SessionUpdatesProvider>
-            <CachedFallbackNotice sessionId="conv_child" />
-          </SessionUpdatesProvider>
-        </MemoryRouter>
-      </QueryClientProvider>,
-    );
-    const handler = frameHandler();
-    expect(screen.queryByRole("status")).toBeNull();
-
-    act(() =>
-      handler({
-        type: "changed",
-        items: [
-          {
-            ...conv("conv_child"),
-            labels: { antigravity_native_transcript_fallback: "1" },
-          },
-        ],
-      }),
-    );
-    await waitFor(() =>
-      expect(screen.getByRole("status")).toHaveTextContent(
-        "Antigravity approval prompts appear in Terminal; respond there to continue.",
-      ),
-    );
-
-    act(() =>
-      handler({
-        type: "changed",
-        items: [
-          {
-            ...conv("conv_child"),
-            labels: { antigravity_native_transcript_fallback: "0" },
-          },
-        ],
-      }),
-    );
-    await waitFor(() => expect(screen.queryByRole("status")).toBeNull());
-  });
-});
 
 describe("SessionUpdatesProvider host changes", () => {
   it("invalidates cached session agents so shell inventories refresh", () => {

@@ -246,7 +246,6 @@ import { useIsCoarsePointer } from "@/hooks/useIsCoarsePointer";
 import { useIsMobileViewport } from "@/hooks/useIsMobileViewport";
 import { ConnectionIndicator } from "./ChatIndicators";
 import { Transcript } from "@/components/chat/Transcript";
-import { AntigravityTranscriptFallbackNotice } from "@/components/chat/AntigravityTranscriptFallbackNotice";
 
 /** Server-info as consumers see it: the probe's result, or "loading". */
 type ServerInfoValue = ServerInfo | "loading";
@@ -1117,7 +1116,6 @@ export function ChatPage() {
       subagentRoutingEligible={subagentRoutingEligible}
       subAgentLabel={subAgentLabel}
       wrapperLabel={capabilitySource.labels[WRAPPER_LABEL_KEY] ?? null}
-      antigravityTranscriptLabels={activeSession?.labels ?? activeConv?.labels}
     />
   );
 
@@ -1378,8 +1376,6 @@ interface MainAgentSurfaceProps {
   subAgentLabel: string | null;
   /** The session's ``omnigent.wrapper`` label; see ``ComposerProps``. */
   wrapperLabel: string | null;
-  /** Labels that identify Antigravity's terminal-transcript fallback mode. */
-  antigravityTranscriptLabels?: Readonly<Record<string, string>>;
 }
 
 /**
@@ -1512,7 +1508,6 @@ const MainAgentSurface = memo(function MainAgentSurfaceImpl({
   subagentRoutingEligible,
   subAgentLabel,
   wrapperLabel,
-  antigravityTranscriptLabels,
 }: MainAgentSurfaceProps) {
   const terminalFirst = useTerminalFirst();
   // Streaming-hot subscriptions and the bubble pipeline live in <Transcript>.
@@ -1775,7 +1770,6 @@ const MainAgentSurface = memo(function MainAgentSurfaceImpl({
             terminalFirst={terminalFirst}
             spacerMeasureRef={spacerMeasureRef}
           />
-          <AntigravityTranscriptFallbackNotice labels={antigravityTranscriptLabels} />
           {/* Floating reply button — scoped to the conversation container. */}
           <SelectionPopup
             containerRef={conversationRef}
