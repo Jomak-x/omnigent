@@ -1,6 +1,6 @@
 import {
   HarnessPicker,
-  HarnessPickerEntry,
+  HarnessPickerConfigRow,
   HarnessPickerConfigPage,
 } from "@/components/composer/HarnessPicker";
 import {
@@ -42,7 +42,6 @@ import {
   ComposerSendButton,
 } from "@/components/composer/ChatComposer";
 import { ComposerAddMenu } from "@/components/composer/ComposerAddMenu";
-import { BackgroundTaskIndicator } from "@/components/composer/BackgroundTaskIndicator";
 import { ReplyDraftBlocks } from "@/components/composer/ReplyDraftBlocks";
 import {
   ComposerWorkspaceBar,
@@ -209,7 +208,6 @@ import { ComposerConfigSections } from "@/components/composer/ComposerConfigSect
 import { ComposerWorkspaceStatus } from "@/components/composer/ComposerWorkspaceStatus";
 import { ComposerPrLink } from "@/components/composer/ComposerPrLink";
 import { ComposerContextRing } from "@/components/composer/ComposerContextRing";
-import { SubagentTaskIndicator } from "@/components/composer/SubagentTaskIndicator";
 import { useComposerGitStatus } from "@/hooks/useComposerGitStatus";
 import {
   formatStatusModelLabel,
@@ -313,14 +311,12 @@ export function isSubagentRoutingEligible(
 }
 
 // Leading whitespace + the command token, so the composer overlay can tint
-// just the `/skill` and leave any args in the default color.
-const SLASH_COMMAND_SPLIT_RE = /^(\s*)(\/[A-Za-z0-9][\w:-]*)/;
+// just the `/command` or `$skill` and leave args in the default color.
+const SLASH_COMMAND_SPLIT_RE = /^(\s*)([/$][A-Za-z0-9][\w:-]*)(?=\s|$)/;
 
 /**
- * Split a slash-command draft into the command token and the rest, for the
- * composer highlight overlay. Returns null when the text isn't a command
- * (callers gate on `isSlashCommandText`, so a returned token is the full
- * command — never a `/etc/hosts`-style path prefix).
+ * Split a command or skill draft for the composer highlight overlay.
+ * Returns null for prose and file paths such as `/etc/hosts`.
  */
 export function splitSlashCommand(
   value: string,
@@ -2004,7 +2000,7 @@ interface ComposerProps {
 /**
  * Build the full slash-command map for the composer: built-ins
  * first (so they top the menu), then one entry per session skill
- * keyed by ``/${skill.name}``. Insertion order matters — the
+ * keyed by the session's skill prefix and name. Insertion order matters — the
  * menu iterates ``Object.entries`` and the user sees built-ins
  * before skills.
  *
@@ -2022,6 +2018,7 @@ export function buildSlashCommandMap(
   showModel: boolean,
   showCompact = true,
   showBtw = false,
+  skillPrefix: "/" | "$" = "/",
 ): Record<string, string> {
   const m: Record<string, string> = {};
   for (const [name, description] of Object.entries(BUILTIN_SLASH_COMMANDS)) {
@@ -2033,7 +2030,7 @@ export function buildSlashCommandMap(
     m[name] = description;
   }
   for (const skill of skills) {
-    m[`/${skill.name}`] = skill.description;
+    m[`${skillPrefix}${skill.name}`] = skill.description;
   }
   return m;
 }
@@ -2051,20 +2048,21 @@ export function buildSlashCommandMap(
  * :param showEffort: Whether ``/effort`` should be selectable.
  * :param showModel: Whether ``/model`` should be selectable (same gate
  *     as :func:`buildSlashCommandMap`'s ``showModel``).
- * :returns: A ``Set`` of slash-prefixed names.
+ * :returns: A ``Set`` of prefixed command and skill names.
  */
 export function buildSlashCommandWithArgsSet(
   skills: readonly { name: string; description: string }[],
   showEffort: boolean,
   showModel: boolean,
   showBtw = false,
+  skillPrefix: "/" | "$" = "/",
 ): Set<string> {
   const s = new Set<string>();
   if (showEffort) s.add("/effort");
   if (showModel) s.add("/model");
   // Selecting /btw fills "/btw " so the user types the side question after it.
   if (showBtw) s.add("/btw");
-  for (const skill of skills) s.add(`/${skill.name}`);
+  for (const skill of skills) s.add(`${skillPrefix}${skill.name}`);
   return s;
 }
 
@@ -2309,6 +2307,7 @@ function ComposerImpl(
   const [commandError, setCommandError] = useState<string | null>(null);
   const [planModeBusy, setPlanModeBusy] = useState(false);
   const [goalDialogOpen, setGoalDialogOpen] = useState(false);
+  const [inputFocused, setInputFocused] = useState(false);
   // Index of the highlighted item in the slash-command suggestions menu.
   // -1 means no item highlighted (menu closed or no matches). When the menu
   // opens with matches the reset logic below pre-selects the first item (0)
@@ -2592,8 +2591,7 @@ function ComposerImpl(
   }, [conversationId, settledConversationId, fullText, files, storedReplyDraft]);
 
   // Session skills (bundled + host-discovered) come from the snapshot
-  // on bind and populate the suggestions menu as ``/skill-name``
-  // entries alongside the built-ins.
+  // on bind. Codex-native invokes skills with `$`; other harnesses use `/`.
   const skills = useChatStore((s) => s.skills);
   const reportedSkillsStatus = useChatStore((s) => s.skillsStatus);
   const terminalPending = useChatStore((s) => s.terminalPending);
@@ -2617,35 +2615,37 @@ function ComposerImpl(
   // claude-native sessions. Selected/typed, it sends as plaintext to the
   // vendor TUI (see submit) — the forwarder relays its answer to the overlay.
   const showBtw = sessionHarness === "claude-native";
+  const skillPrefix = sessionHarness === "codex-native" ? "$" : "/";
   const slashCommands = useMemo(
-    () => buildSlashCommandMap(skills, showEffort, showModel, showCompact, showBtw),
-    [skills, showEffort, showModel, showCompact, showBtw],
+    () => buildSlashCommandMap(skills, showEffort, showModel, showCompact, showBtw, skillPrefix),
+    [skills, showEffort, showModel, showCompact, showBtw, skillPrefix],
   );
   // Skills always need an optional argument fill-in so the user can
   // type extra context after the name; built-in commands keep their
   // existing fill/execute split.
   const slashCommandsWithArgs = useMemo(
-    () => buildSlashCommandWithArgsSet(skills, showEffort, showModel, showBtw),
-    [skills, showEffort, showModel, showBtw],
+    () => buildSlashCommandWithArgsSet(skills, showEffort, showModel, showBtw, skillPrefix),
+    [skills, showEffort, showModel, showBtw, skillPrefix],
   );
 
-  // Suggestions menu is open while the user is still typing the command
-  // name — i.e. the value starts with "/" with no spaces yet (once a
-  // space appears the command name is done and args follow) and no second
-  // "/" (guards against file-path-like strings).
+  // Suggest names until a space starts the arguments; exclude file paths.
   const trimmedValue = value.trimStart();
+  const hasCommandPrefix = trimmedValue.startsWith("/") || trimmedValue.startsWith(skillPrefix);
   const menuOpen =
+    inputFocused &&
     draft.quotes.length === 0 &&
-    trimmedValue.startsWith("/") &&
+    hasCommandPrefix &&
     !trimmedValue.slice(1).includes("/") &&
     !trimmedValue.includes(" ") &&
     files.length === 0;
-  // Query = what the user typed after the leading "/".
+  // Query = what the user typed after the command or skill prefix.
   const menuQuery = menuOpen ? trimmedValue.slice(1) : "";
-  // Tint the `/skill` token blue while the draft reads as a slash command, so
-  // the command shape is signalled as the user types it.
+  // Tint only the command or skill token, leaving arguments in the default color.
   const composerIsCommand =
-    draft.quotes.length === 0 && files.length === 0 && isSlashCommandText(value);
+    draft.quotes.length === 0 &&
+    files.length === 0 &&
+    hasCommandPrefix &&
+    splitSlashCommand(value) !== null;
   const toggleCodexPlanMode = async () => {
     if (planModeBusy) return;
     setCommandError(null);
@@ -3432,8 +3432,6 @@ function ComposerImpl(
                 tokensUsed={composerTokensUsed}
               />
             </div>
-            <BackgroundTaskIndicator />
-            <SubagentTaskIndicator conversationId={composerSessionId} />
           </div>
         </ComposerWorkspaceBar>
       </div>
@@ -3449,14 +3447,14 @@ function ComposerImpl(
           ref: bindTailTextarea,
           value: draft.text,
           onChange: (e) => handleTextChange(null, e),
-          onFocus: (e) => handleTextFocus(null, e.currentTarget),
+          onFocus: (e) => {
+            setInputFocused(true);
+            handleTextFocus(null, e.currentTarget);
+          },
           onKeyDown: handleKeyDown,
           onBlur: () => {
-            // Dismiss the "@"-mention menu when focus leaves the textarea
-            // (clicking a chip's ✕, the Send button, or another field).
-            // Menu rows ``preventDefault`` on mousedown so selecting an entry
-            // keeps focus and does NOT blur — this only fires for genuine
-            // focus-out, where the lingering menu would otherwise float.
+            // Menu rows preventDefault on mousedown so selecting one keeps focus.
+            setInputFocused(false);
             dismissMention();
           },
           onPaste: handlePaste,
@@ -3581,7 +3579,7 @@ function ComposerImpl(
                 </div>
               )}
               {/* Highlight overlay: a textarea can only paint its text one color, so
-            to tint just the `/skill` token we hide the textarea's own glyphs
+            to tint just the command or skill token we hide the textarea's own glyphs
             (text-transparent, caret kept visible) and render an aligned mirror
             behind it. Same box/typography so wrapping matches the textarea
             exactly. Only mounted while the draft is a command. */}
@@ -4323,7 +4321,7 @@ function SessionHarnessPicker({
 }) {
   const isMobile = useIsMobileViewport();
   const [menuOpen, setMenuOpen] = useState(false);
-  const [configMenuOpen, setConfigMenuOpen] = useState(false);
+  const [configMenu, setConfigMenu] = useState<"model" | "effort" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const appliedOpenNonce = useRef(0);
   const conversationId = useChatStore((state) => state.conversationId);
@@ -4391,12 +4389,12 @@ function SessionHarnessPicker({
     appliedOpenNonce.current = openNonce;
     if (!disabled && configurable) {
       setMenuOpen(true);
-      setConfigMenuOpen(true);
+      setConfigMenu(showModels ? "model" : "effort");
     }
-  }, [openNonce, disabled, configurable]);
+  }, [openNonce, disabled, configurable, showModels]);
   useEffect(() => {
     setMenuOpen(false);
-    setConfigMenuOpen(false);
+    setConfigMenu(null);
     setError(null);
   }, [conversationId]);
   const apply = async (change: () => Promise<unknown>) => {
@@ -4438,56 +4436,78 @@ function SessionHarnessPicker({
       )
         await store.setCostControlMode("off");
     });
-  const configContent = (
-    <ComposerConfigSections
-      models={
-        showModels
-          ? {
-              testId: "composer-agent-models",
-              header: "Models",
-              choices: [
-                ...(!modelOptions.some((model) => model.isDefault)
-                  ? [
-                      {
-                        key: "__default__",
-                        label: "Default",
-                        checked: !routingOn && pickerSelectedModel === null,
-                        disabled: busy || pendingModelChange !== null,
-                        onSelect: () => selectModel(null),
-                        testId: "composer-agent-model-default",
-                      },
-                    ]
-                  : []),
-                ...modelOptions.map((model) => ({
-                  key: model.id,
-                  label: nativeModelLabel(model),
-                  checked:
-                    !routingOn &&
-                    (model.id === pickerSelectedModel ||
-                      (pickerSelectedModel === null && model.isDefault === true)),
-                  disabled: busy || pendingModelChange !== null,
-                  onSelect: () => selectModel(model.isDefault ? null : model.id),
-                  testId: `composer-agent-model-${model.id}`,
-                  className: "whitespace-normal break-words",
-                  data: { "data-model-id": model.id },
-                })),
-                ...(pickerSelectedModel &&
-                !modelOptions.some((model) => model.id === pickerSelectedModel)
-                  ? [
-                      {
-                        key: "__current__",
-                        label: `${modelSummary ?? "Default"} (current)`,
-                        checked: !routingOn,
-                        disabled: true,
-                        className: "whitespace-normal break-words",
-                        data: { "data-model-id": pickerSelectedModel },
-                      },
-                    ]
-                  : []),
-              ],
+  const modelContent = (
+    <>
+      {costRoutingEligible && showModels && (
+        <>
+          <DropdownMenuItem
+            disabled={busy || pendingModelChange !== null}
+            onSelect={() =>
+              void apply(() => useChatStore.getState().setCostControlMode(routingOn ? "off" : "on"))
             }
-          : undefined
-      }
+            data-active={routingOn ? "true" : undefined}
+            className="items-center text-13 data-[active=true]:bg-muted data-[active=true]:text-foreground dark:data-[active=true]:bg-muted/50"
+          >
+            <WandSparklesIcon className="size-4" />
+            {SMART_ROUTING_LABEL}
+          </DropdownMenuItem>
+          <DropdownMenuSeparator />
+        </>
+      )}
+      <ComposerConfigSections
+        models={
+          showModels
+            ? {
+                testId: "composer-agent-models",
+                header: "Models",
+                choices: [
+                  ...(!modelOptions.some((model) => model.isDefault)
+                    ? [
+                        {
+                          key: "__default__",
+                          label: "Default",
+                          checked: !routingOn && pickerSelectedModel === null,
+                          disabled: busy || pendingModelChange !== null,
+                          onSelect: () => selectModel(null),
+                          testId: "composer-agent-model-default",
+                        },
+                      ]
+                    : []),
+                  ...modelOptions.map((model) => ({
+                    key: model.id,
+                    label: nativeModelLabel(model),
+                    checked:
+                      !routingOn &&
+                      (model.id === pickerSelectedModel ||
+                        (pickerSelectedModel === null && model.isDefault === true)),
+                    disabled: busy || pendingModelChange !== null,
+                    onSelect: () => selectModel(model.isDefault ? null : model.id),
+                    testId: `composer-agent-model-${model.id}`,
+                    className: "whitespace-normal break-words",
+                    data: { "data-model-id": model.id },
+                  })),
+                  ...(pickerSelectedModel &&
+                  !modelOptions.some((model) => model.id === pickerSelectedModel)
+                    ? [
+                        {
+                          key: "__current__",
+                          label: `${modelSummary ?? "Default"} (current)`,
+                          checked: !routingOn,
+                          disabled: true,
+                          className: "whitespace-normal break-words",
+                          data: { "data-model-id": pickerSelectedModel },
+                        },
+                      ]
+                    : []),
+                ],
+              }
+            : undefined
+        }
+      />
+    </>
+  );
+  const effortContent = (
+    <ComposerConfigSections
       efforts={
         showEffort && availableEfforts.length > 0
           ? {
@@ -4513,7 +4533,7 @@ function SessionHarnessPicker({
         open={menuOpen}
         onOpenChange={(next) => {
           if (!next || (!disabled && !busy && configurable)) setMenuOpen(next);
-          if (!next) setConfigMenuOpen(false);
+          if (!next) setConfigMenu(null);
         }}
         trigger={{
           label: "Configure session",
@@ -4533,60 +4553,59 @@ function SessionHarnessPicker({
         tooltip={<ComposerConfigTooltipRows rows={summary} />}
         tooltipTestId="composer-config-gear-tooltip"
         testId="composer-agent-menu"
-        configOpen={configMenuOpen}
       >
-        {isMobile && configMenuOpen ? (
+        {isMobile && configMenu !== null ? (
           <HarnessPickerConfigPage
             backTestId="composer-agent-config-back"
-            testId="composer-agent-config-menu"
-            onBack={() => setConfigMenuOpen(false)}
+            testId={
+              configMenu === "model" ? "composer-agent-config-menu" : "composer-agent-effort-menu"
+            }
+            onBack={() => setConfigMenu(null)}
           >
-            {configContent}
+            {configMenu === "model" ? modelContent : effortContent}
           </HarnessPickerConfigPage>
         ) : (
           <>
-            <div
-              title={
-                !costRoutingEligible || !showModels
-                  ? "Smart Routing is not available for this session."
-                  : undefined
-              }
-            >
-              <DropdownMenuItem
-                disabled={
-                  busy || pendingModelChange !== null || !costRoutingEligible || !showModels
-                }
-                onSelect={() =>
-                  void apply(() =>
-                    useChatStore.getState().setCostControlMode(routingOn ? "off" : "on"),
+            <PickerSectionHeader>
+              {nativeAgent?.displayName ?? harnessLabel ?? "Session"}
+            </PickerSectionHeader>
+            {showModels && (
+              <HarnessPickerConfigRow
+                label="Model"
+                value={routingOn ? SMART_ROUTING_LABEL : (modelSummary ?? "Default")}
+                open={configMenu === "model"}
+                onOpenChange={(open) =>
+                  setConfigMenu((current) =>
+                    open ? "model" : current === "model" ? null : current,
                   )
                 }
-                data-active={routingOn ? "true" : undefined}
-                className="group/routing items-center text-13 data-[active=true]:bg-muted data-[active=true]:text-foreground dark:data-[active=true]:bg-muted/50"
+                isMobile={isMobile}
+                disabled={busy || pendingModelChange !== null}
+                valueTestId="composer-agent-model-summary"
+                testId="composer-agent-edit"
+                configTestId="composer-agent-config-menu"
               >
-                <WandSparklesIcon className="size-4" />
-                <span className="flex-1">{SMART_ROUTING_LABEL}</span>
-                <span className="min-w-0 truncate text-right text-xs text-muted-foreground opacity-0 group-hover/routing:opacity-100 group-focus/routing:opacity-100">
-                  Model
-                </span>
-              </DropdownMenuItem>
-              <DropdownMenuSeparator />
-            </div>
-            <PickerSectionHeader>{nativeAgent ? "Harnesses" : "Agents"}</PickerSectionHeader>
-            <HarnessPickerEntry
-              open={configMenuOpen}
-              onOpenChange={setConfigMenuOpen}
-              icon={<ComposerAgentIcon agent={iconAgent} />}
-              label={nativeAgent?.displayName ?? harnessLabel ?? "Session"}
-              summary={routingOn ? SMART_ROUTING_LABEL : (modelSummary ?? "Default")}
-              active={!routingOn}
-              isMobile={isMobile}
-              disabled={busy || pendingModelChange !== null}
-              summaryTestId="composer-agent-model-summary"
-              testId="composer-agent-edit"
-              configTestId="composer-agent-config-menu"
-              configContent={configContent}
-            />
+                {modelContent}
+              </HarnessPickerConfigRow>
+            )}
+            {showEffort && availableEfforts.length > 0 && (
+              <HarnessPickerConfigRow
+                label={modelPickerKind === "pi" ? "Thinking level" : "Effort"}
+                value={routingOn ? "Automatic" : (effortLabel ?? "Default")}
+                open={configMenu === "effort"}
+                onOpenChange={(open) =>
+                  setConfigMenu((current) =>
+                    open ? "effort" : current === "effort" ? null : current,
+                  )
+                }
+                isMobile={isMobile}
+                disabled={routingOn || busy || pendingModelChange !== null}
+                testId="composer-agent-effort-select"
+                configTestId="composer-agent-effort-menu"
+              >
+                {effortContent}
+              </HarnessPickerConfigRow>
+            )}
           </>
         )}
       </HarnessPicker>
@@ -4767,6 +4786,7 @@ function useResolvedComposerModel(
     hostId !== undefined &&
       !sessionModelSeeded &&
       (!isReportedModelPicker || effectiveModel === llmModel),
+    codexModelOptions,
   );
   return {
     llmModel,
