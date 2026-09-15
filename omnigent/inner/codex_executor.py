@@ -3385,6 +3385,8 @@ class _CodexAppServerSession:
 class _CodexSessionState:
     app_session: _CodexAppServerSession | None = None
     signature: tuple[str | None, str, str, str] | None = None
+    closing: bool = False
+    close_task: asyncio.Task[None] | None = None
 
 
 class _AppSessionFactory(Protocol):
@@ -3724,10 +3726,15 @@ class CodexExecutor(Executor):
 
     async def close_session(self, session_key: str) -> None:
         state = self._session_states.get(session_key)
+        closed_session: _CodexAppServerSession | None = None
         if state is not None and state.app_session is not None:
-            await state.app_session.close()
+            closed_session = await self._close_state_app_session(state)
         # Failed or cancelled cleanup must remain reachable for the next reap.
-        if state is not None and self._session_states.get(session_key) is state:
+        if (
+            state is not None
+            and self._session_states.get(session_key) is state
+            and state.app_session is closed_session
+        ):
             del self._session_states[session_key]
 
     async def close(self) -> None:
@@ -3735,8 +3742,29 @@ class CodexExecutor(Executor):
         for key in keys:
             await self.close_session(key)
 
+    async def _close_state_app_session(
+        self, state: _CodexSessionState
+    ) -> _CodexAppServerSession | None:
+        app_session = state.app_session
+        if app_session is None:
+            return None
+        if state.close_task is None:
+            state.closing = True
+            state.close_task = asyncio.create_task(app_session.close())
+        close_task = state.close_task
+        try:
+            await close_task
+        except BaseException:
+            if state.close_task is close_task:
+                state.close_task = None
+            raise
+        if state.close_task is close_task:
+            state.close_task = None
+        return app_session
+
     async def _ensure_app_session(
         self,
+        session_key: str,
         state: _CodexSessionState,
         *,
         signature: tuple[str | None, str, str, str],
@@ -3745,11 +3773,23 @@ class CodexExecutor(Executor):
         if (
             state.signature == signature
             and state.app_session is not None
+            and not state.closing
             and getattr(state.app_session, "_transport_error", None) is None
+            and not getattr(state.app_session, "_closing", False)
         ):
             return state.app_session
         if state.app_session is not None:
-            await state.app_session.close()
+            closed_session = await self._close_state_app_session(state)
+            if (
+                self._session_states.get(session_key) is state
+                and state.app_session is closed_session
+            ):
+                state.app_session = None
+                state.signature = None
+                state.closing = False
+            current_state = self._session_states.get(session_key)
+            if current_state is not state:
+                state = self._session_states.setdefault(session_key, _CodexSessionState())
         app_session = self._app_session_factory(
             codex_path=self._codex_path,
             cwd=effective_cwd,
@@ -3816,6 +3856,7 @@ class CodexExecutor(Executor):
             return
 
         app_session = await self._ensure_app_session(
+            session_key,
             state,
             signature=signature,
             effective_cwd=effective_cwd,
