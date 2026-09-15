@@ -15,6 +15,7 @@ from omnigent.inner.codex_executor import (
     CodexExecutor,
     _CodexAppServerSession,
     _CodexSessionState,
+    _tool_signature,
 )
 from omnigent.inner.executor import TurnComplete
 from omnigent.models.model_fallbacks import CODEX_DEFAULT_MODEL
@@ -409,7 +410,8 @@ async def test_close_session_preserves_a_replacement_registered_during_cleanup()
     assert executor._session_states["session-1"] is replacement
 
 
-async def test_same_session_turn_waits_for_inflight_native_close() -> None:
+@pytest.mark.parametrize("waiters", [1, 2])
+async def test_same_session_turn_waits_for_inflight_native_close(waiters: int) -> None:
     old_session, _stream = _session()
     close_started = asyncio.Event()
     close_released = asyncio.Event()
@@ -422,46 +424,56 @@ async def test_same_session_turn_waits_for_inflight_native_close() -> None:
 
     old_session.close = close_old_session  # type: ignore[method-assign]
 
-    new_session = _FakeAppSession([[TurnComplete(response="new")]])
-    factory_calls = 0
+    replacements: list[_FakeAppSession] = []
 
     def factory(**kwargs: object) -> _FakeAppSession:
-        nonlocal factory_calls
-        factory_calls += 1
+        new_session = _FakeAppSession([[TurnComplete(response="new")] for _ in range(waiters)])
+        replacements.append(new_session)
         return new_session
 
     executor = CodexExecutor(codex_path="/bin/echo", cwd="/tmp", app_session_factory=factory)
     executor._session_states["session-1"] = _CodexSessionState(
         app_session=old_session,
-        signature=(CODEX_DEFAULT_MODEL, "", "/tmp", ""),
+        signature=(CODEX_DEFAULT_MODEL, "", "/tmp", _tool_signature([])),
     )
 
     close_task = asyncio.create_task(executor.close_session("session-1"))
     await close_started.wait()
 
-    turn_task = asyncio.create_task(
-        _collect_executor_turn(
-            executor,
-            [{"role": "user", "content": "next", "session_id": "session-1"}],
+    turn_tasks = [
+        asyncio.create_task(
+            _collect_executor_turn(
+                executor,
+                [{"role": "user", "content": "next", "session_id": "session-1"}],
+            )
         )
-    )
+        for _ in range(waiters)
+    ]
     await asyncio.sleep(0)
     assert not any(
         json.loads(wire.decode("utf-8")).get("method") == "turn/start"
         for wire in old_session._proc.stdin.writes
     )
-    assert factory_calls == 0
+    assert not replacements
 
     close_released.set()
     async with asyncio.timeout(1):
         await close_task
-        events = await turn_task
+        results = await asyncio.gather(*turn_tasks)
 
-    assert [event.response for event in events if isinstance(event, TurnComplete)] == ["new"]
-    assert factory_calls == 1
-    assert new_session.calls[0]["messages"] == [
-        {"role": "user", "content": "next", "session_id": "session-1"}
-    ]
+    for events in results:
+        assert [event.response for event in events if isinstance(event, TurnComplete)] == ["new"]
+    assert len(replacements) == 1
+    new_session = replacements[0]
+    assert executor._session_states["session-1"].app_session is new_session
+    assert len(new_session.calls) == waiters
+    assert all(
+        call["messages"] == [{"role": "user", "content": "next", "session_id": "session-1"}]
+        for call in new_session.calls
+    )
+    await executor.close()
+    assert new_session.closed
+    assert not executor._session_states
 
 
 async def test_failed_native_cleanup_cannot_confirm_safe_recovery() -> None:

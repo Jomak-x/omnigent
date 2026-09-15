@@ -3770,15 +3770,17 @@ class CodexExecutor(Executor):
         signature: tuple[str | None, str, str, str],
         effective_cwd: str,
     ) -> _CodexAppServerSession:
-        if (
-            state.signature == signature
-            and state.app_session is not None
-            and not state.closing
-            and getattr(state.app_session, "_transport_error", None) is None
-            and not getattr(state.app_session, "_closing", False)
-        ):
-            return state.app_session
-        if state.app_session is not None:
+        while True:
+            if (
+                state.signature == signature
+                and state.app_session is not None
+                and not state.closing
+                and getattr(state.app_session, "_transport_error", None) is None
+                and not getattr(state.app_session, "_closing", False)
+            ):
+                return state.app_session
+            if state.app_session is None:
+                break
             closed_session = await self._close_state_app_session(state)
             if (
                 self._session_states.get(session_key) is state
@@ -3787,9 +3789,8 @@ class CodexExecutor(Executor):
                 state.app_session = None
                 state.signature = None
                 state.closing = False
-            current_state = self._session_states.get(session_key)
-            if current_state is not state:
-                state = self._session_states.setdefault(session_key, _CodexSessionState())
+            # Another waiter may have registered a replacement during cleanup.
+            state = self._session_states.setdefault(session_key, _CodexSessionState())
         app_session = self._app_session_factory(
             codex_path=self._codex_path,
             cwd=effective_cwd,
