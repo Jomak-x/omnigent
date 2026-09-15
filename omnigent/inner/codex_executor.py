@@ -3291,6 +3291,7 @@ class _CodexAppServerSession:
         if method in {
             "thread/started",
             "thread/status/changed",
+            "remoteControl/status/changed",
             "mcpServer/startupStatus/updated",
             "account/rateLimits/updated",
         }:

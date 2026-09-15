@@ -144,6 +144,8 @@ async def _complete_turn(
             "method": "item/futureTool/outputDelta",
             "params": {"turnId": "turn-1", "delta": "changed"},
         },
+        {"method": "remoteControl/futureActivity", "params": {}},
+        {"method": "remoteControl/status/changed", "params": []},
     ],
 )
 async def test_activity_before_start_ack_disallows_replay(activity: dict[str, object]) -> None:
@@ -179,6 +181,73 @@ async def test_user_input_before_start_ack_does_not_prevent_safe_recovery() -> N
             await turn
         await reader
     assert caught.value.replay_safe is True
+
+
+def _remote_control_status() -> dict[str, object]:
+    return {
+        "method": "remoteControl/status/changed",
+        "params": {
+            "status": "disabled",
+            "serverName": "test-server",
+            "installationId": "test-installation",
+            "environmentId": None,
+        },
+    }
+
+
+@pytest.mark.parametrize("setup_method", ["thread/start", "thread/settings/update"])
+async def test_remote_control_status_during_setup_allows_safe_eof_recovery(
+    setup_method: str,
+) -> None:
+    session, stream = _session()
+    if setup_method == "thread/start":
+        session.thread_id = None
+    reader = asyncio.create_task(session._reader_loop())
+    turn = asyncio.create_task(_collect_turn(session, reasoning_effort="high"))
+    await _pending_request(session, setup_method)
+    stream.feed_data(_frame(_remote_control_status()))
+    stream.feed_eof()
+
+    async with asyncio.timeout(1):
+        with pytest.raises(HarnessTransportClosedError) as caught:
+            await turn
+        await reader
+    assert caught.value.replay_safe is True
+
+
+@pytest.mark.parametrize("activity", ["current", "unfinished-prior"])
+async def test_remote_control_status_preserves_task_replay_hazards(activity: str) -> None:
+    session, stream = _session()
+    reader = asyncio.create_task(session._reader_loop())
+    if activity == "unfinished-prior":
+        stream.feed_data(
+            _frame({"method": "turn/started", "params": {"turn": {"id": "prior-turn"}}})
+        )
+        await asyncio.sleep(0)
+        assert session._reader_started_turn == "prior-turn"
+    turn = asyncio.create_task(_collect_turn(session, reasoning_effort="high"))
+    await _pending_request(session, "thread/settings/update")
+    if activity == "current":
+        stream.feed_data(
+            _frame(
+                {
+                    "method": "item/agentMessage/delta",
+                    "params": {
+                        "turnId": "current-turn",
+                        "itemId": "message-1",
+                        "delta": "Working",
+                    },
+                }
+            )
+        )
+    stream.feed_data(_frame(_remote_control_status()))
+    stream.feed_eof()
+
+    async with asyncio.timeout(1):
+        with pytest.raises(HarnessTransportClosedError) as caught:
+            await turn
+        await reader
+    assert caught.value.replay_safe is False
 
 
 async def test_second_turn_eof_during_setup_rpc_ignores_prior_turn_activity() -> None:
