@@ -2629,6 +2629,8 @@ class _CodexAppServerSession:
         await self.start()
         assert self._proc is not None
 
+        self._native_progress_observed = self._reader_started_turn != self._reader_completed_turn
+
         # Fresh turn: forget any prior turn's gateway-error signals and clear
         # the shared watchdog slot so a resolved earlier failure can't be
         # misattributed to this turn.
@@ -3208,11 +3210,6 @@ class _CodexAppServerSession:
     async def _request(self, method: str, params: CodexParams) -> CodexMessage:
         if self._transport_error is not None:
             raise self._transport_error
-        if method == "turn/start":
-            # Reset before writing: native activity can precede the RPC reply.
-            self._native_progress_observed = (
-                self._reader_started_turn != self._reader_completed_turn
-            )
         request_id = self._next_id
         self._next_id += 1
         loop = asyncio.get_running_loop()

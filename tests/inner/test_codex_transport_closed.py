@@ -33,30 +33,64 @@ def _session() -> tuple[_CodexAppServerSession, asyncio.StreamReader]:
     return session, stream
 
 
-async def _collect_turn(session: _CodexAppServerSession) -> list[object]:
+async def _collect_turn(
+    session: _CodexAppServerSession,
+    *,
+    content: str = "check the workspace",
+    reasoning_effort: str | None = None,
+) -> list[object]:
     return [
         event
         async for event in session.run_turn(
-            messages=[{"role": "user", "content": "check the workspace"}],
+            messages=[{"role": "user", "content": content}],
             tools=[],
             system_prompt="",
             model="test-model",
             cwd="/tmp",
             sandbox="workspace-write",
+            reasoning_effort=reasoning_effort,
         )
     ]
 
 
-async def _pending_start(session: _CodexAppServerSession) -> int:
+async def _pending_request(session: _CodexAppServerSession, method: str) -> int:
     for _ in range(100):
-        if session._pending_requests:
-            return next(iter(session._pending_requests))
+        proc = session._proc
+        writes = proc.stdin.writes if proc is not None and proc.stdin is not None else []
+        for wire in reversed(writes):
+            request = json.loads(wire.decode("utf-8"))
+            request_id = request.get("id")
+            if request.get("method") == method and request_id in session._pending_requests:
+                return request_id
         await asyncio.sleep(0)
-    pytest.fail("turn/start was not sent")
+    pytest.fail(f"{method} was not sent")
+
+
+async def _pending_start(session: _CodexAppServerSession) -> int:
+    return await _pending_request(session, "turn/start")
 
 
 def _frame(message: dict[str, object]) -> bytes:
     return (json.dumps(message) + "\n").encode()
+
+
+async def _complete_turn(
+    session: _CodexAppServerSession,
+    stream: asyncio.StreamReader,
+    turn_id: str,
+) -> list[object]:
+    turn = asyncio.create_task(_collect_turn(session))
+    request_id = await _pending_start(session)
+    stream.feed_data(
+        b"".join(
+            [
+                _frame({"id": request_id, "result": {"turn": {"id": turn_id}}}),
+                _frame({"method": "turn/started", "params": {"turn": {"id": turn_id}}}),
+                _frame({"method": "turn/completed", "params": {"turn": {"id": turn_id}}}),
+            ]
+        )
+    )
+    return await turn
 
 
 @pytest.mark.parametrize(
@@ -136,6 +170,58 @@ async def test_user_input_before_start_ack_does_not_prevent_safe_recovery() -> N
             await turn
         await reader
     assert caught.value.replay_safe is True
+
+
+async def test_second_turn_eof_during_setup_rpc_ignores_prior_turn_activity() -> None:
+    session, stream = _session()
+    reader = asyncio.create_task(session._reader_loop())
+    first_events = await _complete_turn(session, stream, "turn-1")
+    assert [event.response for event in first_events if isinstance(event, TurnComplete)] == [""]
+
+    turn = asyncio.create_task(_collect_turn(session, reasoning_effort="high"))
+    await _pending_request(session, "thread/settings/update")
+    stream.feed_eof()
+
+    async with asyncio.timeout(1):
+        with pytest.raises(HarnessTransportClosedError) as caught:
+            await turn
+        await reader
+    assert caught.value.replay_safe is True
+
+
+async def test_second_turn_setup_activity_before_start_ack_disallows_replay() -> None:
+    session, stream = _session()
+    reader = asyncio.create_task(session._reader_loop())
+    first_events = await _complete_turn(session, stream, "turn-1")
+    assert [event.response for event in first_events if isinstance(event, TurnComplete)] == [""]
+
+    turn = asyncio.create_task(_collect_turn(session, reasoning_effort="high"))
+    settings_id = await _pending_request(session, "thread/settings/update")
+    stream.feed_data(
+        b"".join(
+            [
+                _frame(
+                    {
+                        "method": "item/agentMessage/delta",
+                        "params": {
+                            "turnId": "turn-2",
+                            "itemId": "message-2",
+                            "delta": "Working",
+                        },
+                    }
+                ),
+                _frame({"id": settings_id, "result": {"settings": {}}}),
+            ]
+        )
+    )
+    await _pending_start(session)
+    stream.feed_eof()
+
+    async with asyncio.timeout(1):
+        with pytest.raises(HarnessTransportClosedError) as caught:
+            await turn
+        await reader
+    assert caught.value.replay_safe is False
 
 
 @pytest.mark.parametrize("terminal_order", ["final", "delta-completed", "completed-final"])
