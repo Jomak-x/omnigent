@@ -67,9 +67,6 @@ from omnigent.harnesses.claude_native.status import CONTEXT_RAW_FILE
 from omnigent.harnesses.kiro_native.bridge import bridge_root as kiro_bridge_root
 from omnigent.models.claude_model_vocabulary import MODEL_VOCABULARY_ENV_VARS
 from omnigent.models.model_metadata import concrete_reported_model
-from omnigent.runtime.mcp_tool_result import (
-    mcp_response_from_tool_result as _mcp_response_from_tool_result,
-)
 from omnigent.util.json_types import JsonObject as _JsonObject
 
 if TYPE_CHECKING:
@@ -5885,6 +5882,13 @@ def _run_relay_tool(
 
 async def _await_tool_result(result: Awaitable[object]) -> object:
     return await result
+
+
+def _mcp_response_from_tool_result(result: object) -> _JsonObject:
+    """Convert relay results without loading the runtime on observer hook imports."""
+    from omnigent.runtime.mcp_tool_result import mcp_response_from_tool_result
+
+    return mcp_response_from_tool_result(result)
 
 
 def _notification_writer(

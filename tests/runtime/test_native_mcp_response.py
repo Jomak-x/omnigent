@@ -15,8 +15,23 @@ from omnigent.runtime.mcp_tool_result import (
 from tests._image_fixtures import _TINY_JPEG_BASE64, _TINY_PNG_BASE64
 
 
-def test_claude_compatibility_alias_is_the_shared_converter() -> None:
-    assert _mcp_response_from_tool_result is mcp_response_from_tool_result
+def test_claude_compatibility_wrapper_uses_the_shared_converter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from omnigent.runtime import mcp_tool_result
+
+    result = {"result": "ok"}
+    response = {"content": [{"type": "text", "text": "shared converter"}]}
+    calls: list[object] = []
+
+    def convert(value: object) -> dict:
+        calls.append(value)
+        return response
+
+    monkeypatch.setattr(mcp_tool_result, "mcp_response_from_tool_result", convert)
+
+    assert _mcp_response_from_tool_result(result) is response
+    assert calls == [result]
 
 
 @pytest.mark.parametrize("is_error", [False, True])
