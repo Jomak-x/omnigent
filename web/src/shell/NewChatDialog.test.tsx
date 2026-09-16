@@ -5,6 +5,7 @@ import type * as ChatStoreModule from "@/store/chatStore";
 import type * as NativeBridgeModule from "@/lib/nativeBridge";
 
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Profiler, type ProfilerOnRenderCallback } from "react";
 import { MemoryRouter } from "react-router-dom";
@@ -296,6 +297,35 @@ const CLAUDE_MODEL_OPTIONS_RESULT = {
     { id: "opus", model: "system.ai.claude-opus-4-8[1m]", displayName: "Opus 4.8" },
     { id: "sonnet", model: "system.ai.claude-sonnet-4-6[1m]", displayName: "Sonnet 4.6" },
     { id: "haiku", model: "system.ai.claude-haiku-4-5", displayName: "Haiku 4.5" },
+  ],
+};
+// Devin's catalog carries per-model effort rungs, which the effort picker derives
+// from: swe-2 exposes only medium/high/max (`swe-2-low` is a different Fusion
+// model), while claude-opus-5 exposes the full ladder.
+const DEVIN_MODEL_OPTIONS_RESULT = {
+  ...SUCCESS_QUERY_STATE,
+  data: [
+    {
+      id: "swe-2",
+      displayName: "SWE-2",
+      isDefault: true,
+      supportedReasoningEfforts: [
+        { reasoningEffort: "medium" },
+        { reasoningEffort: "high" },
+        { reasoningEffort: "max" },
+      ],
+    },
+    {
+      id: "claude-opus-5",
+      displayName: "Claude Opus 5",
+      supportedReasoningEfforts: [
+        { reasoningEffort: "low" },
+        { reasoningEffort: "medium" },
+        { reasoningEffort: "high" },
+        { reasoningEffort: "xhigh" },
+        { reasoningEffort: "max" },
+      ],
+    },
   ],
 };
 const CODEX_MODEL_OPTIONS_RESULT = {
@@ -1137,7 +1167,11 @@ function setupLandingMocks() {
   } as unknown as ReturnType<typeof useHostWorktrees>);
   mockHosts([host("online")]);
   mockModelQueries((harness) =>
-    harness === "codex-native" ? CODEX_MODEL_OPTIONS_RESULT : CLAUDE_MODEL_OPTIONS_RESULT,
+    harness === "codex-native"
+      ? CODEX_MODEL_OPTIONS_RESULT
+      : harness === "devin-native"
+        ? DEVIN_MODEL_OPTIONS_RESULT
+        : CLAUDE_MODEL_OPTIONS_RESULT,
   );
   mockAgents(DEFAULT_LANDING_AGENTS);
 }
@@ -3106,7 +3140,10 @@ describe("NewChatLandingScreen", () => {
     );
     const editConfig = screen.getByTestId("new-chat-landing-agent-config-a1");
     expect(editConfig).toHaveTextContent(/^Edit$/);
-    expect(editConfig).toHaveAttribute("aria-label", "Edit Claude Code configuration");
+    expect(editConfig).toHaveAttribute("aria-hidden", "true");
+    expect(screen.getByTestId("new-chat-landing-agent-a1")).toHaveAccessibleDescription(
+      "Enter to select; Right Arrow to edit configuration.",
+    );
     expect(editConfig).toHaveClass("composer-agent-edit");
     expect(screen.getByTestId("new-chat-landing-agent-summary-a1")).toHaveClass("text-right");
     expect(screen.getByTestId("new-chat-landing-agent-a1")).toContainElement(editConfig);
@@ -3176,7 +3213,7 @@ describe("NewChatLandingScreen", () => {
         fireEvent.click(screen.getByTestId("new-chat-landing-harness-more"));
       }
 
-      if (["claude", "codex", "pi"].includes(native.key)) {
+      if (["claude", "codex", "pi", "devin"].includes(native.key)) {
         fireEvent.click(screen.getByTestId(`new-chat-landing-agent-config-${agentId}`));
         expect(screen.getByTestId("new-chat-landing-agent-models")).toBeVisible();
         expect(screen.getByTestId("new-chat-landing-agent-efforts")).toBeVisible();
@@ -3208,7 +3245,7 @@ describe("NewChatLandingScreen", () => {
       renderLanding();
       selectUnconfiguredAgent(`a_${key}`);
       fireEvent.pointerDown(screen.getByTestId("new-chat-landing-agent-select"), { button: 0 });
-      fireEvent.click(screen.getByTestId("new-chat-landing-agent-a_claude"));
+      fireEvent.click(screen.getByTestId("new-chat-landing-agent-config-a_claude"));
       expect(screen.getByTestId("new-chat-landing-agent-models")).toBeVisible();
       expect(screen.queryByText("Advanced settings")).toBeNull();
     },
@@ -3258,7 +3295,7 @@ describe("NewChatLandingScreen", () => {
     } as unknown as Response);
     renderLanding();
     fireEvent.pointerDown(screen.getByTestId("new-chat-landing-agent-select"), { button: 0 });
-    fireEvent.click(screen.getByTestId("new-chat-landing-agent-a2"));
+    fireEvent.click(screen.getByTestId("new-chat-landing-agent-config-a2"));
 
     expect(screen.getByTestId("new-chat-landing-agent-efforts")).toHaveTextContent("Effort");
     expect(screen.getByTestId("new-chat-landing-agent-effort-low")).toBeTruthy();
@@ -3295,7 +3332,7 @@ describe("NewChatLandingScreen", () => {
     } as unknown as Response);
     renderLanding();
     fireEvent.pointerDown(screen.getByTestId("new-chat-landing-agent-select"), { button: 0 });
-    fireEvent.click(screen.getByTestId("new-chat-landing-agent-a2"));
+    fireEvent.click(screen.getByTestId("new-chat-landing-agent-config-a2"));
     fireEvent.click(screen.getByTestId("new-chat-landing-agent-model-databricks-gpt-5-6"));
     fireEvent.click(screen.getByTestId("new-chat-landing-agent-effort-xhigh"));
     expect(screen.getByTestId("new-chat-landing-agent-effort-value")).toHaveTextContent("xHigh");
@@ -3309,6 +3346,53 @@ describe("NewChatLandingScreen", () => {
     expect(screen.queryByTestId("new-chat-landing-agent-effort-value")).toBeNull();
     const { body } = await submitAndReadBody();
     expect(body.reasoning_effort).toBeUndefined();
+  });
+
+  it("renders Devin's own model families and only the selected model's effort rungs", () => {
+    // Devin declares only `devinMode` (not modelPicker/permissionMode). Both the
+    // config-content gate and the models-section gate must honour that flag, or a
+    // Devin chat opens with no way to pick a model or effort at launch.
+    mockAgents([
+      {
+        id: "a1",
+        name: "claude-native-ui",
+        display_name: "Claude Code",
+        description: null,
+        harness: "claude-native",
+        skills: [],
+      },
+      {
+        id: "a3",
+        name: "devin-native-ui",
+        display_name: "Devin",
+        description: null,
+        harness: "devin-native",
+        skills: [],
+      },
+    ]);
+    mockHosts([{ ...host("online"), configured_harnesses: { "devin-native": true } } as Host]);
+    useHostModelOptionsMock.mockImplementation(
+      (_hostId, harness) =>
+        (harness === "devin-native"
+          ? DEVIN_MODEL_OPTIONS_RESULT
+          : CLAUDE_MODEL_OPTIONS_RESULT) as unknown as ReturnType<typeof useHostModelOptions>,
+    );
+    renderLanding();
+    openAgentModels("a3");
+
+    const models = screen.getByTestId("new-chat-landing-agent-models");
+    expect(models).toHaveTextContent("SWE-2");
+    expect(screen.getByTestId("new-chat-landing-agent-model-claude-opus-5")).toBeTruthy();
+
+    // Effort is a model-variant suffix and the rungs are PER MODEL: swe-2 (the
+    // default here) has only medium/high/max, so offering "low" would compose an
+    // id that is a different model and silently fall back to the bare family.
+    for (const rung of ["medium", "high", "max"]) {
+      expect(screen.getByTestId(`new-chat-landing-agent-effort-${rung}`)).toBeTruthy();
+    }
+    for (const rung of ["low", "xhigh"]) {
+      expect(screen.queryByTestId(`new-chat-landing-agent-effort-${rung}`)).toBeNull();
+    }
   });
 
   it("hides adjacent Codex effort options when the model has no effort metadata", () => {
@@ -3326,7 +3410,7 @@ describe("NewChatLandingScreen", () => {
     );
     renderLanding();
     fireEvent.pointerDown(screen.getByTestId("new-chat-landing-agent-select"), { button: 0 });
-    fireEvent.click(screen.getByTestId("new-chat-landing-agent-a2"));
+    fireEvent.click(screen.getByTestId("new-chat-landing-agent-config-a2"));
     expect(screen.getByTestId("new-chat-landing-agent-models")).toBeTruthy();
     expect(screen.queryByTestId("new-chat-landing-agent-efforts")).toBeNull();
   });
@@ -3626,12 +3710,35 @@ describe("NewChatLandingScreen", () => {
     );
   });
 
+  it.each([false, true])(
+    "resumes typing on the first outside click with harness config open=%s",
+    async (configOpen) => {
+      const user = userEvent.setup();
+      renderLanding();
+      const picker = screen.getByTestId("new-chat-landing-agent-select");
+      const draft = screen.getByTestId("new-chat-landing-input");
+      await user.click(picker);
+      if (configOpen) await user.click(screen.getByTestId("new-chat-landing-agent-config-a2"));
+      expect(screen.getAllByRole("menu")).toHaveLength(configOpen ? 2 : 1);
+      await user.click(draft);
+      await waitFor(() => expect(screen.queryByRole("menu")).not.toBeInTheDocument());
+      expect(draft).toHaveFocus();
+      await user.keyboard("continue typing");
+      expect(draft).toHaveValue("continue typing");
+
+      await user.click(picker);
+      await user.click(screen.getByTestId("new-chat-landing-host-chip"));
+      expect(screen.getByTestId("new-chat-landing-host-host_1")).toBeVisible();
+      expect(screen.queryByTestId("new-chat-landing-agent-a1")).not.toBeInTheDocument();
+    },
+  );
+
   it("opens harness configuration beside the list and keeps both menus visible", () => {
     renderLanding();
     fireEvent.pointerDown(screen.getByTestId("new-chat-landing-agent-select"), { button: 0 });
     const menu = screen.getByRole("menu");
     const harness = screen.getByTestId("new-chat-landing-agent-a2");
-    fireEvent.click(harness);
+    fireEvent.click(screen.getByTestId("new-chat-landing-agent-config-a2"));
 
     expect(screen.getAllByRole("menu")).toHaveLength(2);
     expect(menu).toContainElement(harness);
@@ -3654,11 +3761,11 @@ describe("NewChatLandingScreen", () => {
     renderLanding();
     fireEvent.pointerDown(screen.getByTestId("new-chat-landing-agent-select"), { button: 0 });
     const parent = screen.getByRole("menu");
-    fireEvent.click(screen.getByTestId("new-chat-landing-agent-a2"));
+    fireEvent.click(screen.getByTestId("new-chat-landing-agent-config-a2"));
     fireEvent.focus(parent);
     expect(screen.getAllByRole("menu")).toHaveLength(2);
     expect(screen.getByRole("menuitemcheckbox", { name: "GPT-5.6" })).toBeVisible();
-    fireEvent.click(screen.getByTestId("new-chat-landing-agent-a1"));
+    fireEvent.click(screen.getByTestId("new-chat-landing-agent-config-a1"));
     expect(screen.getAllByRole("menu")).toHaveLength(2);
     expect(screen.getByTestId("new-chat-landing-agent-select")).toHaveAccessibleName(
       /^Claude Code/,
@@ -3751,15 +3858,15 @@ describe("NewChatLandingScreen", () => {
     fireEvent.change(screen.getByTestId("new-chat-landing-file-input"), {
       target: { files: [file] },
     });
-    expect(screen.getByText("diagram.png")).toBeTruthy();
+    expect(screen.getByAltText("diagram.png")).toBeTruthy();
     first.unmount();
 
     renderLanding();
     expect((screen.getByTestId("new-chat-landing-input") as HTMLTextAreaElement).value).toBe(
       "half-typed thought",
     );
-    // The attachment chip re-renders from the restored draft.
-    expect(screen.getByText("diagram.png")).toBeTruthy();
+    // The attachment thumbnail re-renders from the restored draft.
+    expect(screen.getByAltText("diagram.png")).toBeTruthy();
   });
 
   it("hands the draft back when a create the user walked away from is rejected", async () => {
@@ -3927,6 +4034,10 @@ describe("NewChatLandingScreen", () => {
     const polly = screen.getByTestId("new-chat-landing-agent-a_polly");
     expect(claude.compareDocumentPosition(cursor) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(cursor.compareDocumentPosition(codex) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(decodeURIComponent(claude.querySelector("img")?.getAttribute("src") ?? "")).toContain(
+      "M4.709 15.955",
+    );
+    expect(claude.querySelector("img")).not.toHaveClass("dark:invert");
     expect(cursor.querySelector("img")).toHaveClass("size-4", "dark:invert");
     expect(decodeURIComponent(codex.querySelector("img")?.getAttribute("src") ?? "")).toContain(
       "#B1A7FF",
@@ -3944,7 +4055,7 @@ describe("NewChatLandingScreen", () => {
     ).toBeTruthy();
   });
 
-  it("keeps the selected secondary harness in Other", () => {
+  it("promotes the selected secondary harness on reopen without interrupting configuration", () => {
     mockAgents([
       {
         id: "a_claude",
@@ -3964,11 +4075,31 @@ describe("NewChatLandingScreen", () => {
       },
     ]);
     renderLanding();
-    selectUnconfiguredAgent("a_pi");
-    fireEvent.pointerDown(screen.getByTestId("new-chat-landing-agent-select"), { button: 0 });
+    const picker = screen.getByTestId("new-chat-landing-agent-select");
+    fireEvent.pointerDown(picker, { button: 0 });
+    fireEvent.click(screen.getByTestId("new-chat-landing-harness-more"));
+    const pi = screen.getByTestId("new-chat-landing-agent-a_pi");
+    const otherMenu = pi.closest('[role="menu"]');
+    fireEvent.click(screen.getByTestId("new-chat-landing-agent-config-a_pi"));
+    expect(pi).toHaveAttribute("data-active", "true");
+    expect(otherMenu).toContainElement(pi);
+    expect(screen.getByTestId("new-chat-landing-agent-models")).toBeVisible();
+    closeMenu();
+
+    fireEvent.pointerDown(picker, { button: 0 });
+    const promotedPi = screen.getByTestId("new-chat-landing-agent-a_pi");
+    expect(screen.getByRole("menu")).toContainElement(promotedPi);
+    expect(promotedPi).toHaveAttribute("data-active", "true");
+    expect(screen.queryByTestId("new-chat-landing-harness-more")).toBeNull();
+    fireEvent.click(screen.getByTestId("new-chat-landing-agent-config-a_pi"));
+    expect(screen.getByTestId("new-chat-landing-agent-models")).toBeVisible();
+    closeMenu();
+
+    selectAgent("a_claude");
+    fireEvent.pointerDown(picker, { button: 0 });
     expect(screen.queryByTestId("new-chat-landing-agent-a_pi")).toBeNull();
     fireEvent.click(screen.getByTestId("new-chat-landing-harness-more"));
-    expect(screen.getByTestId("new-chat-landing-agent-a_pi")).toBeTruthy();
+    expect(screen.getByTestId("new-chat-landing-agent-a_pi")).not.toHaveAttribute("data-active");
   });
 
   // claude-native (a1, fully supported) plus cursor-native (a_cursor, not) so
@@ -6145,7 +6276,7 @@ describe("NewChatLandingScreen attachments", () => {
     expect(screen.getByText("Drop files here")).toBeTruthy();
     const file = new File(["hello"], "shot.png", { type: "image/png" });
     fireEvent.drop(surface, { dataTransfer: fileDrag([file]) });
-    expect(screen.getByText("shot.png")).toBeTruthy();
+    expect(screen.getByAltText("shot.png")).toBeTruthy();
     expect(screen.queryByText("Drop files here")).toBeNull();
   });
 
@@ -6547,7 +6678,7 @@ describe("NewChatLandingScreen agent picker + config gear", () => {
     ]);
     renderLanding({ smart_routing_enabled: true });
     openPicker();
-    fireEvent.click(screen.getByTestId("new-chat-landing-harness-more"));
+    expect(screen.getByTestId("new-chat-landing-agent-a_bare")).toBeVisible();
     expect(screen.queryByTestId("new-chat-landing-agent-config-a_bare")).toBeNull();
     expect(screen.queryByTestId("new-chat-landing-config-gear")).toBeNull();
   });
@@ -6703,7 +6834,7 @@ describe("NewChatLandingScreen agent picker (mobile drill-in)", () => {
     renderLanding();
     openPicker();
     const menu = screen.getByRole("menu");
-    fireEvent.click(screen.getByTestId("new-chat-landing-agent-a2"));
+    fireEvent.click(screen.getByTestId("new-chat-landing-agent-config-a2"));
     expect(screen.getAllByRole("menu")).toEqual([menu]);
     expect(screen.getByRole("menuitemcheckbox", { name: "GPT-5.6" })).toBeVisible();
     expect(screen.queryByText("Advanced settings")).toBeNull();
@@ -6736,12 +6867,40 @@ describe("NewChatLandingScreen agent picker (mobile drill-in)", () => {
       selectUnconfiguredAgent(`a_${key}`);
       expect(screen.queryByRole("menu")).toBeNull();
       openPicker();
-      fireEvent.click(screen.getByTestId("new-chat-landing-agent-a_claude"));
+      fireEvent.click(screen.getByTestId("new-chat-landing-agent-config-a_claude"));
       expect(screen.getAllByRole("menu")).toHaveLength(1);
       expect(screen.getByTestId("new-chat-landing-agent-models")).toBeVisible();
       expect(screen.queryByText("Advanced settings")).toBeNull();
     },
   );
+
+  it("promotes a secondary harness after returning from mobile configuration", () => {
+    mockAgents(
+      NATIVE_CODING_AGENTS.filter((native) =>
+        ["claude", "pi", "opencode"].includes(native.key),
+      ).map((native) => ({
+        id: `a_${native.key}`,
+        name: native.agentName,
+        display_name: native.displayName,
+        description: null,
+        harness: native.harness,
+        skills: [],
+      })),
+    );
+    renderLanding();
+    openPicker();
+    fireEvent.click(screen.getByTestId("new-chat-landing-harness-more"));
+    fireEvent.click(screen.getByTestId("new-chat-landing-agent-config-a_pi"));
+    expect(screen.getByTestId("new-chat-landing-agent-models")).toBeVisible();
+    fireEvent.click(screen.getByTestId("new-chat-landing-page-back"));
+    expect(screen.getByTestId("new-chat-landing-agent-a_pi")).toHaveAttribute(
+      "data-active",
+      "true",
+    );
+    fireEvent.click(screen.getByTestId("new-chat-landing-harness-more"));
+    expect(screen.getByTestId("new-chat-landing-agent-a_opencode")).toBeVisible();
+    expect(screen.queryByTestId("new-chat-landing-agent-a_pi")).toBeNull();
+  });
 
   it("drills into the Custom agents page in place and returns via Back", () => {
     // A custom (non-builtin) agent lands in the Custom agents group.
@@ -7359,6 +7518,13 @@ describe("NewChatLandingScreen Smart Routing harness row", () => {
 
   const SMART_ROUTING_ROW = "new-chat-landing-harness-smart-routing";
 
+  function expectSmartRoutingHidden(): void {
+    expect(screen.queryByTestId(SMART_ROUTING_ROW)).toBeNull();
+    const heading = screen.getByText("Harnesses");
+    expect(heading.closest('[role="menu"]')?.firstElementChild).toBe(heading);
+    expect(screen.getByTestId("new-chat-landing-agent-a1")).toBeVisible();
+  }
+
   function openPicker(): void {
     fireEvent.pointerDown(screen.getByTestId("new-chat-landing-agent-select"), { button: 0 });
   }
@@ -7377,31 +7543,39 @@ describe("NewChatLandingScreen Smart Routing harness row", () => {
     // The row leads the menu, above the "Harnesses" heading and its rows.
     const heading = screen.getByText("Harnesses");
     expect(row.compareDocumentPosition(heading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(row).not.toHaveAttribute("data-disabled");
+    expect(row.nextElementSibling).toHaveAttribute("role", "separator");
+    expect(row.nextElementSibling?.nextElementSibling).toBe(heading);
   });
 
-  it("keeps routing visible but disabled when the server flag is off", () => {
-    renderLanding({ smart_routing_enabled: false });
-    openPicker();
-    const row = screen.getByTestId(SMART_ROUTING_ROW);
-    expect(row).toHaveAttribute("data-disabled");
-    expect(row).toHaveAttribute("aria-description", expect.stringContaining("enabled routing"));
-    fireEvent.click(row);
-    expect(screen.getByTestId("new-chat-landing-agent-select").textContent).not.toContain(
-      "Smart Routing",
-    );
-    // The ordinary harness rows are still there, so this isn't vacuous.
-    expect(screen.getByTestId("new-chat-landing-agent-a1")).toBeTruthy();
-  });
+  it.each([false, true])(
+    "hides routing and its separator when the server flag is off (mobile=%s)",
+    (mobile) => {
+      const restoreViewport = mobile ? forceMobileViewport() : () => {};
+      try {
+        renderLanding({ smart_routing_enabled: false });
+        openPicker();
+        expectSmartRoutingHidden();
+        // The separator between Harnesses and Agents must remain.
+        expect(screen.getByText("Agents").previousElementSibling).toHaveAttribute(
+          "role",
+          "separator",
+        );
+      } finally {
+        restoreViewport();
+      }
+    },
+  );
 
   it.each([
     ["codex not installed", { "claude-native": true, "codex-native": false }],
     ["claude not installed", { "claude-native": false, "codex-native": true }],
     ["codex needs auth", { "claude-native": true, "codex-native": "needs-auth" }],
-  ])("disables the row when %s", (_case, configured) => {
+  ])("hides the row and its separator when %s", (_case, configured) => {
     mockHosts([{ ...host("online"), configured_harnesses: configured } as Host]);
     renderLanding({ smart_routing_enabled: true });
     openPicker();
-    expect(screen.getByTestId(SMART_ROUTING_ROW)).toHaveAttribute("data-disabled");
+    expectSmartRoutingHidden();
   });
 
   it("shows the row when the host reports both native CLIs ready", () => {
@@ -7422,12 +7596,11 @@ describe("NewChatLandingScreen Smart Routing harness row", () => {
     ["codex isn't gateway-backed", { "claude-native": true, "codex-native": false }],
     ["claude isn't gateway-backed", { "claude-native": false, "codex-native": true }],
     ["neither is gateway-backed", { "claude-native": false, "codex-native": false }],
-  ])("disables the row when %s", (_case, gateway) => {
+  ])("hides the row and its separator when %s", (_case, gateway) => {
     mockHosts([{ ...host("online"), gateway_inference: gateway } as Host]);
     renderLanding({ smart_routing_enabled: true });
     openPicker();
-    expect(screen.getByTestId(SMART_ROUTING_ROW)).toHaveAttribute("data-disabled");
-    expect(screen.getByTestId("new-chat-landing-agent-a1")).toBeTruthy();
+    expectSmartRoutingHidden();
   });
 
   it.each([
@@ -7448,32 +7621,36 @@ describe("NewChatLandingScreen Smart Routing harness row", () => {
     ["codex isn't gateway-backed", { "claude-native": true, "codex-native": false }],
     ["claude isn't gateway-backed", { "claude-native": false, "codex-native": true }],
     ["neither is gateway-backed", { "claude-native": false, "codex-native": false }],
-  ] as const)("disables the row when the judge is configured and %s", (_case, gateway) => {
-    mockHosts([{ ...host("online"), gateway_inference: gateway } as Host]);
-    renderLanding({
-      smart_routing_enabled: true,
-      smart_routing_sources: { external: true, oss: true },
-    });
-    openPicker();
-    expect(screen.getByTestId(SMART_ROUTING_ROW)).toHaveAttribute("data-disabled");
-    expect(screen.getByTestId("new-chat-landing-agent-a1")).toBeTruthy();
-  });
+  ] as const)(
+    "hides the row and its separator when the judge is configured and %s",
+    (_case, gateway) => {
+      mockHosts([{ ...host("online"), gateway_inference: gateway } as Host]);
+      renderLanding({
+        smart_routing_enabled: true,
+        smart_routing_sources: { external: true, oss: true },
+      });
+      openPicker();
+      expectSmartRoutingHidden();
+    },
+  );
 
   // The judge-only deployment: no external router, so the pane's harness pick
   // has nobody to make it. Gateway backing is beside the point.
   it.each([
     ["both families gateway-backed", { "claude-native": true, "codex-native": true }],
     ["the host reports nothing", undefined],
-  ] as const)("disables the row on a judge-only server with %s", (_case, gateway) => {
-    mockHosts([{ ...host("online"), gateway_inference: gateway } as Host]);
-    renderLanding({
-      smart_routing_enabled: true,
-      smart_routing_sources: { external: false, oss: true },
-    });
-    openPicker();
-    expect(screen.getByTestId(SMART_ROUTING_ROW)).toHaveAttribute("data-disabled");
-    expect(screen.getByTestId("new-chat-landing-agent-a1")).toBeTruthy();
-  });
+  ] as const)(
+    "hides the row and its separator on a judge-only server with %s",
+    (_case, gateway) => {
+      mockHosts([{ ...host("online"), gateway_inference: gateway } as Host]);
+      renderLanding({
+        smart_routing_enabled: true,
+        smart_routing_sources: { external: false, oss: true },
+      });
+      openPicker();
+      expectSmartRoutingHidden();
+    },
+  );
 
   // Both sources, both arms on the gateway: the one shape that keeps the row —
   // and the shape a legacy server (no `smart_routing_sources`, just
@@ -7494,7 +7671,7 @@ describe("NewChatLandingScreen Smart Routing harness row", () => {
   });
 
   // Neither source: the row goes, same as judge-only.
-  it("disables the row when the server reports neither source", () => {
+  it("hides the row and its separator when the server reports neither source", () => {
     mockHosts([
       {
         ...host("online"),
@@ -7506,7 +7683,7 @@ describe("NewChatLandingScreen Smart Routing harness row", () => {
       smart_routing_sources: { external: false, oss: false },
     });
     openPicker();
-    expect(screen.getByTestId(SMART_ROUTING_ROW)).toHaveAttribute("data-disabled");
+    expectSmartRoutingHidden();
   });
 
   it("announces the gateway as the cause when a host switch takes the row away", async () => {
@@ -7535,7 +7712,7 @@ describe("NewChatLandingScreen Smart Routing harness row", () => {
     );
   });
 
-  it("disables the row when only one native wrapper agent is registered", () => {
+  it("hides the row and its separator when only one native wrapper agent is registered", () => {
     mockAgents([
       {
         id: "a1",
@@ -7548,7 +7725,7 @@ describe("NewChatLandingScreen Smart Routing harness row", () => {
     ]);
     renderLanding({ smart_routing_enabled: true });
     openPicker();
-    expect(screen.getByTestId(SMART_ROUTING_ROW)).toHaveAttribute("data-disabled");
+    expectSmartRoutingHidden();
   });
 
   it("reads 'Smart Routing' on the composer chip and highlights only its own row", async () => {
@@ -7724,7 +7901,7 @@ describe("NewChatLandingScreen Smart Routing harness row", () => {
       expect(chip).toHaveAccessibleName("Claude Code, Model Default");
       expect(screen.queryByTestId("new-chat-landing-smart-routing-dropped")).toBeNull();
       openPicker();
-      expect(screen.getByTestId(SMART_ROUTING_ROW)).toHaveAttribute("data-disabled");
+      expectSmartRoutingHidden();
       // The arm may come back, so the pick stays remembered.
       expect(JSON.parse(localStorage.getItem(LAST_HARNESS_KEY) ?? "{}")).toEqual({
         a1: "auto-native",
