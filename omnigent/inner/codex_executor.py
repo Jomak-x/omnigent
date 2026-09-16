@@ -3216,16 +3216,25 @@ class _CodexAppServerSession:
         future: asyncio.Future[CodexMessage] = loop.create_future()
         self._pending_requests[request_id] = future
         try:
-            await self._send_message(
-                {
-                    "id": request_id,
-                    "method": method,
-                    "params": params,
-                }
-            )
+            try:
+                await self._send_message(
+                    {
+                        "id": request_id,
+                        "method": method,
+                        "params": params,
+                    }
+                )
+            except Exception as exc:
+                if self._transport_error is not None:
+                    raise self._transport_error from exc
+                raise
             response = await future
         finally:
             self._pending_requests.pop(request_id, None)
+            if not future.done():
+                future.cancel()
+            elif not future.cancelled():
+                future.exception()
         error = response.get("error")
         if error:
             raise RuntimeError(str(error))

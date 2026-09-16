@@ -1,6 +1,7 @@
 """Reader loss must fail promptly without replaying unobserved native work."""
 
 import asyncio
+import gc
 import json
 import os
 import signal
@@ -612,3 +613,107 @@ async def test_cancelled_native_close_kills_and_reaps_sigterm_ignoring_child(
             child.kill()
         await child.wait()
         await session.close()
+
+
+@pytest.mark.parametrize("activity, malformed", [(False, False), (True, False), (False, True)])
+async def test_stdin_failure_after_reader_eof_preserves_typed_replay_safety(
+    activity: bool,
+    malformed: bool,
+) -> None:
+    session, stream = _session()
+    sending = asyncio.Event()
+    release = asyncio.Event()
+
+    async def fail_drain() -> None:
+        sending.set()
+        await release.wait()
+        raise BrokenPipeError("stdin closed")
+
+    session._proc.stdin.drain = fail_drain
+    request = asyncio.create_task(session._request("turn/start", {}))
+    await sending.wait()
+    if activity:
+        stream.feed_data(
+            _frame(
+                {
+                    "method": "item/started",
+                    "params": {"item": {"id": "shell-1", "type": "commandExecution"}},
+                }
+            )
+        )
+    if malformed:
+        stream.feed_data(b"[]\n")
+    stream.feed_eof()
+    await session._reader_loop()
+    release.set()
+    with pytest.raises(HarnessTransportClosedError) as caught:
+        await request
+    assert caught.value is session._transport_error
+    assert caught.value.replay_safe is (not activity and not malformed)
+    assert not session._pending_requests
+
+
+@pytest.mark.parametrize("eof", [False, True])
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_interrupted_send_settles_pending_response_without_future_warnings(
+    eof: bool,
+    cancel: bool,
+) -> None:
+    loop = asyncio.get_running_loop()
+    warnings: list[str] = []
+    previous_handler = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: warnings.append(context["message"]))
+
+    async def exercise_send() -> None:
+        session, stream = _session()
+        sending = asyncio.Event()
+        release = asyncio.Event()
+        send_error = BrokenPipeError("stdin closed")
+
+        async def fail_drain() -> None:
+            sending.set()
+            await release.wait()
+            raise send_error
+
+        session._proc.stdin.drain = fail_drain
+        request = asyncio.create_task(session._request("turn/start", {}))
+        await sending.wait()
+        future = next(iter(session._pending_requests.values()))
+        if eof:
+            stream.feed_eof()
+            await session._reader_loop()
+        if cancel:
+            request.cancel()
+        else:
+            release.set()
+        expected = (
+            asyncio.CancelledError
+            if cancel
+            else HarnessTransportClosedError
+            if eof
+            else BrokenPipeError
+        )
+        try:
+            await request
+        except BaseException as error:
+            # Check exception type separately so warning collection also runs on regressions.
+            raised_type = type(error)
+            if not cancel and not eof:
+                assert error is send_error
+        else:
+            pytest.fail("interrupted send unexpectedly succeeded")
+        assert not session._pending_requests
+        if not eof:
+            assert future.cancelled()
+        send_error.__traceback__ = None
+        if session._transport_error is not None:
+            session._transport_error.__traceback__ = None
+        assert raised_type is expected
+
+    try:
+        await exercise_send()
+        await asyncio.sleep(0)
+        gc.collect()
+        assert not warnings
+    finally:
+        loop.set_exception_handler(previous_handler)
