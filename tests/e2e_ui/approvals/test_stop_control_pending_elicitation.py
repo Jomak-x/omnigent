@@ -6,8 +6,8 @@ request parks a pending elicitation into that window — the same shape as an
 agent raising an interactive question or tool approval mid-turn. The pending
 card locks the send path, but the turn is still active server-side, so the
 composer's Interrupt control must remain visible and enabled until the prompt
-is answered: without it the user has no way to cancel the turn short of
-answering the question.
+is answered. This synthetic hook tests button visibility; cancellation of
+the prompt itself belongs to the harness that owns it.
 """
 
 from __future__ import annotations
