@@ -1732,13 +1732,16 @@ def _format_call_result(result: CallToolResult) -> str:
             else None
         )
         if canonical is not None:
-            content.append({**block.model_dump(mode="json"), "data": canonical})
+            # Claude's bundled MCP schema takes optional fields as absent, not
+            # null, so unset ``annotations``/``meta`` must be omitted rather
+            # than serialized as ``null``.
+            content.append({**block.model_dump(mode="json", exclude_none=True), "data": canonical})
             has_image = True
         else:
             text = _format_content_block(block)
             legacy_parts.append(text)
             content.append(
-                block.model_dump(mode="json")
+                block.model_dump(mode="json", exclude_none=True)
                 if isinstance(block, ImageContent)
                 and block.data
                 and block.mimeType.startswith("image/")

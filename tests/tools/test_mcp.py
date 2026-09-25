@@ -774,7 +774,7 @@ def test_format_call_result_malformed_image_keeps_valid_neighbor(
     assert decode_mcp_image_result(parsed) is not None
     assert mcp_response_from_tool_result(parsed) == {
         "content": [
-            valid.model_dump(mode="json"),
+            valid.model_dump(mode="json", exclude_none=True),
             {"type": "text", "text": json.dumps(malformed.model_dump())},
             {"type": "text", "text": trailing},
         ],

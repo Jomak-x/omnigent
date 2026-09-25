@@ -229,7 +229,10 @@ def test_mixed_invalid_image_keeps_live_bytes_and_existing_replay_safeguard() ->
     )
     native = _mcp_response_from_tool_result(json.loads(output))
     assert native["content"][0]["type"] == "image"
-    assert native["content"][1] == {"type": "text", "text": json.dumps(invalid.model_dump())}
+    assert native["content"][1] == {
+        "type": "text",
+        "text": json.dumps(invalid.model_dump(mode="json", exclude_none=True)),
+    }
     replayed = tool_result_content_blocks(output)
     assert replayed.blocks is not None
     assert replayed.blocks[0]["type"] == "image"
@@ -278,3 +281,49 @@ def test_corrupt_container_with_image_signature_stays_lossless_text() -> None:
     payload["content"].append(corrupt.model_dump())
     native = _mcp_response_from_tool_result(payload)
     assert native["content"][-1] == {"type": "text", "text": json.dumps(corrupt.model_dump())}
+
+
+def test_native_wire_omits_unset_optional_image_fields() -> None:
+    """Unset MCP optionals must be absent, not null, on the native wire.
+
+    Claude's bundled MCP schema accepts an omitted ``annotations`` field but
+    rejects ``annotations: null``. A real ``ImageContent`` dumps unset
+    optionals as ``None``, and envelopes persisted before the fix carry them,
+    so both the producer and the shared converter must drop them.
+    """
+    block = ImageContent(type="image", data=_TINY_PNG_BASE64, mimeType="image/png")
+    assert block.model_dump(mode="json")["annotations"] is None  # dump default
+
+    output = _format_call_result(CallToolResult(content=[block], isError=False))
+    envelope_block = json.loads(output)["content"][0]
+    assert "annotations" not in envelope_block
+    assert "meta" not in envelope_block
+
+    expected = [{"type": "image", "data": _TINY_PNG_BASE64, "mimeType": "image/png"}]
+    native = _mcp_response_from_tool_result(json.loads(output))
+    assert native["content"] == expected
+
+    stale = json.loads(output)
+    stale["content"][0]["annotations"] = None
+    decoded = decode_mcp_image_result(stale)
+    assert decoded is not None
+    assert decoded.native_content() == expected
+
+
+def test_native_image_payload_rejects_oversized_declared_dimensions() -> None:
+    """A small compressed payload cannot force a large pixel allocation.
+
+    The header-declared pixel count is checked against the attachment path's
+    decoded-pixel cap before ``load()`` materializes the pixel buffer.
+    """
+    import base64
+    import io
+
+    from PIL import Image
+
+    from omnigent.runtime.mcp_tool_result import native_image_payload
+
+    buffer = io.BytesIO()
+    Image.new("1", (7000, 7000)).save(buffer, format="PNG")  # 49 MP, a few KB
+    oversized = base64.b64encode(buffer.getvalue()).decode()
+    assert native_image_payload(oversized, "image/png") is None

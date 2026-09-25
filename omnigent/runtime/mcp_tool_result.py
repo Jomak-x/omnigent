@@ -73,18 +73,35 @@ def canonical_image_payload(data: str, media_type: str) -> str | None:
 
 
 def native_image_payload(data: str, media_type: str) -> str | None:
-    """Validate an image container before sending it to a live vision client."""
+    """Validate an image container before sending it to a live vision client.
+
+    Byte and pixel ceilings are enforced before the full decode, reusing the
+    attachment path's limits, so an untrusted MCP server cannot force a large
+    synchronous pixel allocation: the byte cap is checked on the encoded
+    length before any decode, and the declared dimensions are checked from
+    the (cheap) header parse before ``load()`` materializes the pixel buffer.
+    """
     canonical = canonical_image_payload(data, media_type)
     if canonical is None:
         return None
     from PIL import Image
 
+    from omnigent.runtime.content_resolver import (
+        IMAGE_MAX_DECODED_PIXELS,
+        MAX_IMAGE_UPLOAD_BYTES,
+    )
+
+    if len(canonical) // 4 * 3 > MAX_IMAGE_UPLOAD_BYTES:
+        return None
+    decoded = base64.b64decode(canonical)
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("error", Image.DecompressionBombWarning)
-            with Image.open(io.BytesIO(base64.b64decode(canonical))) as image:
+            with Image.open(io.BytesIO(decoded)) as image:
+                if image.width * image.height > IMAGE_MAX_DECODED_PIXELS:
+                    return None
                 image.verify()
-            with Image.open(io.BytesIO(base64.b64decode(canonical))) as image:
+            with Image.open(io.BytesIO(decoded)) as image:
                 image.load()
     except (
         OSError,
@@ -114,10 +131,15 @@ class McpImageResult:
         for block in self.content:
             if block["type"] == "image":
                 canonical = native_image_payload(str(block["data"]), str(block["mimeType"]))
+                if canonical is None:
+                    blocks.append({"type": "text", "text": json.dumps(block)})
+                    continue
+                # Native client schemas take optional fields as absent, not
+                # null; drop stray null-valued fields (e.g. ``annotations``)
+                # a producer's model dump may have put into the envelope.
                 blocks.append(
-                    {**block, "data": canonical}
-                    if canonical is not None
-                    else {"type": "text", "text": json.dumps(block)}
+                    {key: value for key, value in block.items() if value is not None}
+                    | {"data": canonical}
                 )
             else:
                 blocks.append(block)
