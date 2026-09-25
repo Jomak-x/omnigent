@@ -105,6 +105,30 @@ class _FakePipe:
         return b""
 
 
+class _ScriptedStdoutPipe(_FakePipe):
+    """Stdout that emits scripted frames, then stays open like a live server.
+
+    The prompt stdout-EOF recovery turns an immediate EOF into
+    ``HarnessTransportClosedError``, and ``start()`` resets ``_events``,
+    so tests that drive the real ``start()`` must deliver events through
+    the reader and keep stdout open until ``close()`` cancels the reader
+    task.
+    """
+
+    def __init__(self, lines: list[bytes]) -> None:
+        super().__init__()
+        self._lines = list(lines)
+
+    async def read(self, n: int) -> bytes:
+        if self._lines:
+            return self._lines.pop(0)
+        await asyncio.Event().wait()
+        return b""
+
+    async def readline(self) -> bytes:
+        return await self.read(-1)
+
+
 class _OverflowingPipe:
     def __init__(self):
         self.read_calls = 0
@@ -3706,15 +3730,21 @@ def test_app_server_negotiates_direct_tools_from_server_version(
                 {"result": {"turn": {"id": "turn-1"}}},
             ]
         )
-        session._events.put_nowait(
-            {
-                "method": "turn/completed",
-                "params": {"turnId": "turn-1", "turn": {"id": "turn-1"}},
-            }
+        fake_process = _FakeProcess()
+        fake_process.stdout = _ScriptedStdoutPipe(
+            [
+                json.dumps(
+                    {
+                        "method": "turn/completed",
+                        "params": {"turnId": "turn-1", "turn": {"id": "turn-1"}},
+                    }
+                ).encode()
+                + b"\n"
+            ]
         )
         with patch(
             "omnigent.inner.codex_executor._create_subprocess_exec",
-            new=AsyncMock(return_value=_FakeProcess()),
+            new=AsyncMock(return_value=fake_process),
         ):
             try:
                 async for _event in session.run_turn(
