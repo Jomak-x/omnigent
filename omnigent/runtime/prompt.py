@@ -14,6 +14,7 @@ from omnigent.entities import (
     MessageData,
     NativeToolData,
 )
+from omnigent.inner.native_attachments import expand_framework_notices
 from omnigent.runtime.mcp_tool_result import decode_mcp_image_result
 from omnigent.runtime.tool_result_replay import (
     image_omitted_placeholder,
@@ -349,6 +350,8 @@ def _dedupe_tool_output_images(output: str) -> str:
 
 def history_to_input_items(
     items: list[ConversationItem],
+    *,
+    preserve_framework_notices: bool = False,
 ) -> list[dict[str, Any]]:
     """
     Convert persisted ConversationItems into Responses API input items.
@@ -360,6 +363,7 @@ def history_to_input_items(
     kept as separate items rather than embedded in assistant messages.
 
     :param items: Persisted conversation items in chronological order.
+    :param preserve_framework_notices: Keep structured notices for native transports.
     :returns: A list of Responses API input item dicts suitable for
         ``client.responses.create(input=...)``.
     """
@@ -374,12 +378,7 @@ def history_to_input_items(
             # the LLM. The text description survives and gives
             # the LLM context about files it previously produced.
             content = _strip_output_annotations(item.data.content)
-            result.append(
-                {
-                    "role": item.data.role,
-                    "content": content,
-                }
-            )
+            result.append({"role": item.data.role, "content": content})
 
         elif item.type == "function_call":
             assert isinstance(item.data, FunctionCallData)
@@ -424,4 +423,4 @@ def history_to_input_items(
             # before being prepended to history.
             pass
 
-    return result
+    return result if preserve_framework_notices else expand_framework_notices(result)
