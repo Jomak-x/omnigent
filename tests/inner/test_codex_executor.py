@@ -401,6 +401,29 @@ class TestCodexExecutor(unittest.TestCase):
         prompt = _prompt_for_turn(messages, is_new_thread=False)
         self.assertEqual(prompt, "Summarize our conversation.")
 
+    def test_build_initial_prompt_keeps_user_attachments_as_native_blocks(self):
+        # A fresh thread replaying multimodal history must keep image bytes as
+        # native input_image blocks, not flatten the data URI into prompt text.
+        uri = "data:image/png;base64,QUJD"
+        messages = [
+            {"role": "user", "content": [{"type": "input_image", "image_url": uri}]},
+            {"role": "assistant", "content": "Saw it."},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "Compare."},
+                    {"type": "input_image", "image_url": uri},
+                ],
+            },
+        ]
+        prompt = _build_initial_prompt(messages)
+        self.assertIsInstance(prompt, list)
+        wire = _to_codex_input_items(prompt)
+        images = [item for item in wire if item["type"] == "image"]
+        self.assertEqual(images, [{"type": "image", "url": uri}, {"type": "image", "url": uri}])
+        text = "\n".join(item["text"] for item in wire if item["type"] == "text")
+        self.assertNotIn(uri, text)
+
     def test_goal_objective_requires_a_standalone_command(self):
         self.assertEqual(
             _goal_objective_from_content("  /goal Finish the implementation  "),

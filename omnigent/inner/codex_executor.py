@@ -2253,8 +2253,7 @@ def _build_initial_prompt(
     :returns: A string prompt or a list of content block dicts.
     """
     user_messages = [msg for msg in messages if msg.get("role") == "user"]
-    has_tool_history = any(msg.get("role") == "tool" for msg in messages)
-    if len(messages) <= 1 or (len(user_messages) <= 1 and not has_tool_history):
+    if len(messages) <= 1 or len(user_messages) <= 1:
         return _extract_latest_user_content(messages)
 
     has_attachments = any(
